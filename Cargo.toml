@@ -51,3 +51,7 @@ proc-macro = true
 [dependencies]
 syn = { version= "1", features = ["full"] }
 proc-macro2 = "1"
+
+[[test]]
+name="smoke"
+path="tests/smoke.rs"
