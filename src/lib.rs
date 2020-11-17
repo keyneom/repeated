@@ -114,12 +114,10 @@ pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
     }
 
     // Figure out what the repeated body tempalte is
-    let rep_body_string;
+    let mut rep_body_string = None;
     match (prelude_ident, postlude_ident) {
         (None, None) => {
-            let body_captures = SIMPLE_BODY_RE.captures(&tokens_string).unwrap();
-            rep_body_string = (&body_captures["body"]).to_string();
-            println!("SIMPLE_BODY_RE: {}", rep_body_string);
+            
         }
         (Some(prelude_ident), Some(postlude_ident)) => {
             let body_re = Regex::new(&format!(r"(?xs)
@@ -128,8 +126,8 @@ pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
             %\s*?%\s*?{}\s*?postlude\s(?P<postlude>.*)\spostlude\s*?{}\s*?%\s*?%\s*?$    # Postlude",
             prelude_ident, prelude_ident, postlude_ident, postlude_ident)).unwrap();
             let body_captures = body_re.captures(&tokens_string).unwrap();
-            rep_body_string = (&body_captures["body"]).to_string();
-            println!("BODY_RE: {}", rep_body_string);
+            rep_body_string = Some((&body_captures["body"]).to_string());
+            println!("BODY_RE: {:?}", rep_body_string);
         }
         (Some(prelude_ident), None) => {
             let body_re = Regex::new(&format!(r"(?xs)
@@ -137,8 +135,8 @@ pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
             (?P<body>.*?)                                                                # Repitition Body",
             prelude_ident, prelude_ident)).unwrap();
             let body_captures = body_re.captures(&tokens_string).unwrap();
-            rep_body_string = (&body_captures["body"]).to_string();
-            println!("BODY_RE: {}", rep_body_string);
+            rep_body_string = Some((&body_captures["body"]).to_string());
+            println!("BODY_RE: {:?}", rep_body_string);
         }
         (None, Some(postlude_ident)) => {
             let body_re = Regex::new(&format!(r"(?xs)
@@ -146,20 +144,22 @@ pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
             %\s*?%\s*?{}\s*?postlude\s(?P<postlude>.*)\spostlude\s*?{}\s*?%\s*?%\s*?$    # Postlude",
             postlude_ident, postlude_ident)).unwrap();
             let body_captures = body_re.captures(&tokens_string).unwrap();
-            rep_body_string = (&body_captures["body"]).to_string();
-            println!("BODY_RE: {}", rep_body_string);
+            rep_body_string = Some((&body_captures["body"]).to_string());
+            println!("BODY_RE: {:?}", rep_body_string);
         }
     }
 
     // TODO: Get the generated tokenstreams to use the spans from the original tokenstream so that we can indicate syntax errors more easily!
-    let rep_body_tokenstream = TokenStream::from(
+    let rep_body_tokenstream = if let Some(rep_body_string) = rep_body_string { TokenStream::from(
         rep_body_string
             .parse::<proc_macro2::TokenStream>()
             .unwrap_or_else(|e| {
                 let e: syn::Error = e.into();
                 e.to_compile_error()
             }),
-    );
+    ) } else {
+        repeated_tokens
+    };
     let repitition_definition: RepeatDefinition = parse_macro_input!(rep_body_tokenstream);
     generate_repititions(prelude_string, repitition_definition, postlude_string)
         .unwrap_or_else(|e| TokenStream::from(e.to_compile_error()))
