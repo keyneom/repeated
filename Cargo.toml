@@ -51,7 +51,5 @@ proc-macro = true
 [dependencies]
 syn = { version= "1", features = ["full"] }
 proc-macro2 = "1"
-
-[[test]]
-name="smoke"
-path="tests/smoke.rs"
+regex = "1"
+lazy_static = "1"

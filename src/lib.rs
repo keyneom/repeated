@@ -1,5 +1,8 @@
+#[macro_use]
+extern crate lazy_static; 
 use proc_macro::TokenStream;
 use proc_macro2::Span;
+use regex::Regex;
 use syn::{
     braced, bracketed,
     parse::{Parse, ParseStream},
@@ -69,33 +72,65 @@ fn split_once<'a>(in_string: &'a str, pat: &str) -> Option<(&'a str, &'a str)> {
     Some((first, second))
 }
 
+lazy_static! {
+    static ref PRELUDE_IDENT_RE: Regex = Regex::new(r"^\s*?%\s*?%\s*?(?P<prelude_ident>\w*?)\s*?prelude\s").unwrap();
+    static ref POSTLUDE_IDENT_RE: Regex = Regex::new(r"\spostlude\s*?(?P<postlude_ident>\w*?)\s*?%\s*?%\s*?$").unwrap();
+}
+
 #[proc_macro]
 pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
     let tokens_string = format!("{}", repeated_tokens);
+
+    let mut prelude_string = String::new();
+    let prelude_ident_captures = PRELUDE_IDENT_RE.captures(&tokens_string);
+    if let Some(prelude_ident_captures) = prelude_ident_captures {
+        println!("{:?}", prelude_ident_captures);
+        let prelude_ident = &prelude_ident_captures["prelude_ident"];
+        let prelude_re = Regex::new(&format!(r"(?s)^\s*?%\s*?%\s*?{}\s*?prelude\s(?P<prelude>.*)\sprelude\s*?{}\s*?%\s*?%", prelude_ident, prelude_ident)).unwrap();
+        let prelude_body_captures = prelude_re.captures(&tokens_string);
+        let prelude_body = &prelude_body_captures.unwrap()["prelude"];
+        prelude_string = prelude_body.into();
+        println!("{}", prelude_body);
+    }
+
+    let mut postlude_string = String::new();
+    let postlude_ident_captures = POSTLUDE_IDENT_RE.captures(&tokens_string);
+    if let Some(postlude_ident_captures) = postlude_ident_captures {
+        println!("{:?}", postlude_ident_captures);
+        let postlude_ident = &postlude_ident_captures["postlude_ident"];
+        let postlude_re = Regex::new(&format!(r"(?s)%\s*?%\s*?{}\s*?postlude\s(?P<postlude>.*)\spostlude\s*?{}\s*?%\s*?%\s*?$", postlude_ident, postlude_ident)).unwrap();
+        let postlude_body_captures = postlude_re.captures(&tokens_string);
+        let postlude_body = &postlude_body_captures.unwrap()["postlude"];
+        postlude_string = postlude_body.into();
+        println!("{}", postlude_body);
+    }
+
+    // TODO: Switch to Lazy Static compilation where possible. Might only need two regexes here, one if a postlude exists and one if it doesn't
+    let body_re = Regex::new(r"(?s)(?P<body>.*)").unwrap();
+    
+    // TODO: Remove all this and replace with body_re logic instead
     let mut the_rest = None;
-    let mut prelude_string = "".to_string();
-    let s = split_once(&tokens_string, "% % prelude");
+    let s = split_once(&tokens_string, "% % my prelude");
     if let Some(prelude_check) = s {
-        if let Some((prelude_body, rest)) = split_once(prelude_check.1, "prelude % %") {
-            prelude_string = prelude_body.to_string();
+        if let Some((prelude_body, rest)) = split_once(prelude_check.1, "prelude my % %") {
+            // prelude_string = prelude_body.to_string();
             the_rest = Some(rest);
         }
     }
 
-    let mut postlude_string = "".to_string();
     let s = split_once(
         if let Some(st) = the_rest {
             st
         } else {
             &tokens_string
         },
-        "% % postlude",
+        "% % my postlude",
     );
     if let Some(postlude_check) = s {
         the_rest = Some(postlude_check.0);
-        if let Some((postlude_body, _)) = split_once(postlude_check.1, "postlude % %") {
-            postlude_string = postlude_body.to_string();
-        }
+        // if let Some((postlude_body, _)) = split_once(postlude_check.1, "postlude % %") {
+        //     postlude_string = postlude_body.to_string();
+        // }
     }
 
     if let Some(rep_body) = the_rest {

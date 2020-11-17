@@ -17,18 +17,18 @@ fn works_nested() {
 fn works_with_match() {
     let t = 3;
     repeated!(
-        %%prelude
+        %% my prelude
         match t {
-        prelude%%
+        prelude my %%
         for x in [0;15] {
             %%x%% => {
                 println!("{}", repeated!(for y in [0;%%x%%] {%%x%%},""));
             }
         }
-        %%postlude
+        %% my postlude
         _ => panic!(),
         }
-        postlude%%
+        postlude my %%
     );
 }
 
@@ -36,40 +36,40 @@ fn works_with_match() {
 fn works_with_large_match() {
     let t = 3;
     repeated!(
-        %%prelude
+        %% my prelude
         match t {
-        prelude%%
+        prelude my %%
         for x in [0;255] {
             %%x%% => {
                 println!("{}", 5+3+12+9);
             }
         }
-        %%postlude
+        %% my postlude
         _ => panic!(),
         }
-        postlude%%
+        postlude my %%
     );
 }
 
 
-// #[test]
-// fn works_regardless_of_token_string_whitespacing() {
-//     let t = 3;
-//     repeated!(
-//         %%prelude
-//         match t {
-//         prelude%%
-//         for x in [0;15] {
-//             %%x%% => {
-//                 println!("{}", 5);
-//             }
-//         }
-//         %%postlude
-//         _ => panic!(),
-//         }
-//         postlude%%
-//     );
-// }
+#[test]
+fn works_regardless_of_token_string_whitespacing() {
+    let t = 3;
+    repeated!(
+        %% my prelude
+        match t {
+        prelude my %%
+        for x in [0;15] {
+            %%x%% => {
+                println!("{}", 5);
+            }
+        }
+        %% my postlude
+        _ => panic!(),
+        }
+        postlude my %%
+    );
+}
 
 
 #[test]
