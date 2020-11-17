@@ -81,7 +81,6 @@ pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
     let mut prelude_string = String::new();
     let prelude_ident_captures = PRELUDE_IDENT_RE.captures(&tokens_string);
     if let Some(prelude_ident_captures) = prelude_ident_captures {
-        println!("{:?}", prelude_ident_captures);
         prelude_ident = Some(prelude_ident_captures["prelude_ident"].to_string());
         let prelude_re = Regex::new(&format!(
             r"(?s)^\s*?%\s*?%\s*?{}\s*?prelude\s(?P<prelude>.*)\sprelude\s*?{}\s*?%\s*?%",
@@ -92,14 +91,12 @@ pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
         let prelude_body_captures = prelude_re.captures(&tokens_string);
         let prelude_body = &prelude_body_captures.unwrap()["prelude"];
         prelude_string = prelude_body.into();
-        println!("PRELUDE_RE: {}", prelude_body);
     }
 
     let mut postlude_ident = None;
     let mut postlude_string = String::new();
     let postlude_ident_captures = POSTLUDE_IDENT_RE.captures(&tokens_string);
     if let Some(postlude_ident_captures) = postlude_ident_captures {
-        println!("{:?}", postlude_ident_captures);
         postlude_ident = Some(postlude_ident_captures["postlude_ident"].to_string());
         let postlude_re = Regex::new(&format!(
             r"(?s)%\s*?%\s*?{}\s*?postlude\s(?P<postlude>.*)\spostlude\s*?{}\s*?%\s*?%\s*?$",
@@ -110,7 +107,6 @@ pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
         let postlude_body_captures = postlude_re.captures(&tokens_string);
         let postlude_body = &postlude_body_captures.unwrap()["postlude"];
         postlude_string = postlude_body.into();
-        println!("POSTLUDE_RE: {}", postlude_body);
     }
 
     // Figure out what the repeated body tempalte is
@@ -127,7 +123,6 @@ pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
             prelude_ident, prelude_ident, postlude_ident, postlude_ident)).unwrap();
             let body_captures = body_re.captures(&tokens_string).unwrap();
             rep_body_string = Some((&body_captures["body"]).to_string());
-            println!("BODY_RE: {:?}", rep_body_string);
         }
         (Some(prelude_ident), None) => {
             let body_re = Regex::new(&format!(r"(?xs)
@@ -136,7 +131,6 @@ pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
             prelude_ident, prelude_ident)).unwrap();
             let body_captures = body_re.captures(&tokens_string).unwrap();
             rep_body_string = Some((&body_captures["body"]).to_string());
-            println!("BODY_RE: {:?}", rep_body_string);
         }
         (None, Some(postlude_ident)) => {
             let body_re = Regex::new(&format!(r"(?xs)
@@ -145,7 +139,6 @@ pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
             postlude_ident, postlude_ident)).unwrap();
             let body_captures = body_re.captures(&tokens_string).unwrap();
             rep_body_string = Some((&body_captures["body"]).to_string());
-            println!("BODY_RE: {:?}", rep_body_string);
         }
     }
 
