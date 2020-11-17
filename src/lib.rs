@@ -1,5 +1,5 @@
 #[macro_use]
-extern crate lazy_static; 
+extern crate lazy_static;
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use regex::Regex;
@@ -65,91 +65,104 @@ impl Parse for RepeatDefinition {
     }
 }
 
-fn split_once<'a>(in_string: &'a str, pat: &str) -> Option<(&'a str, &'a str)> {
-    let mut splitter = in_string.splitn(2, pat);
-    let first = splitter.next()?;
-    let second = splitter.next()?;
-    Some((first, second))
-}
-
 lazy_static! {
-    static ref PRELUDE_IDENT_RE: Regex = Regex::new(r"^\s*?%\s*?%\s*?(?P<prelude_ident>\w*?)\s*?prelude\s").unwrap();
-    static ref POSTLUDE_IDENT_RE: Regex = Regex::new(r"\spostlude\s*?(?P<postlude_ident>\w*?)\s*?%\s*?%\s*?$").unwrap();
+    static ref PRELUDE_IDENT_RE: Regex =
+        Regex::new(r"^\s*?%\s*?%\s*?(?P<prelude_ident>\w*?)\s*?prelude\s").unwrap();
+    static ref POSTLUDE_IDENT_RE: Regex =
+        Regex::new(r"\spostlude\s*?(?P<postlude_ident>\w*?)\s*?%\s*?%\s*?$").unwrap();
+    static ref SIMPLE_BODY_RE: Regex = Regex::new(r"(?s)(?P<body>.*)").unwrap();
 }
 
 #[proc_macro]
 pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
     let tokens_string = format!("{}", repeated_tokens);
 
+    let mut prelude_ident = None;
     let mut prelude_string = String::new();
     let prelude_ident_captures = PRELUDE_IDENT_RE.captures(&tokens_string);
     if let Some(prelude_ident_captures) = prelude_ident_captures {
         println!("{:?}", prelude_ident_captures);
-        let prelude_ident = &prelude_ident_captures["prelude_ident"];
-        let prelude_re = Regex::new(&format!(r"(?s)^\s*?%\s*?%\s*?{}\s*?prelude\s(?P<prelude>.*)\sprelude\s*?{}\s*?%\s*?%", prelude_ident, prelude_ident)).unwrap();
+        prelude_ident = Some(prelude_ident_captures["prelude_ident"].to_string());
+        let prelude_re = Regex::new(&format!(
+            r"(?s)^\s*?%\s*?%\s*?{}\s*?prelude\s(?P<prelude>.*)\sprelude\s*?{}\s*?%\s*?%",
+            prelude_ident.as_ref().unwrap(),
+            prelude_ident.as_ref().unwrap()
+        ))
+        .unwrap();
         let prelude_body_captures = prelude_re.captures(&tokens_string);
         let prelude_body = &prelude_body_captures.unwrap()["prelude"];
         prelude_string = prelude_body.into();
-        println!("{}", prelude_body);
+        println!("PRELUDE_RE: {}", prelude_body);
     }
 
+    let mut postlude_ident = None;
     let mut postlude_string = String::new();
     let postlude_ident_captures = POSTLUDE_IDENT_RE.captures(&tokens_string);
     if let Some(postlude_ident_captures) = postlude_ident_captures {
         println!("{:?}", postlude_ident_captures);
-        let postlude_ident = &postlude_ident_captures["postlude_ident"];
-        let postlude_re = Regex::new(&format!(r"(?s)%\s*?%\s*?{}\s*?postlude\s(?P<postlude>.*)\spostlude\s*?{}\s*?%\s*?%\s*?$", postlude_ident, postlude_ident)).unwrap();
+        postlude_ident = Some(postlude_ident_captures["postlude_ident"].to_string());
+        let postlude_re = Regex::new(&format!(
+            r"(?s)%\s*?%\s*?{}\s*?postlude\s(?P<postlude>.*)\spostlude\s*?{}\s*?%\s*?%\s*?$",
+            postlude_ident.as_ref().unwrap(),
+            postlude_ident.as_ref().unwrap()
+        ))
+        .unwrap();
         let postlude_body_captures = postlude_re.captures(&tokens_string);
         let postlude_body = &postlude_body_captures.unwrap()["postlude"];
         postlude_string = postlude_body.into();
-        println!("{}", postlude_body);
+        println!("POSTLUDE_RE: {}", postlude_body);
     }
 
-    // TODO: Switch to Lazy Static compilation where possible. Might only need two regexes here, one if a postlude exists and one if it doesn't
-    let body_re = Regex::new(r"(?s)(?P<body>.*)").unwrap();
-    
-    // TODO: Remove all this and replace with body_re logic instead
-    let mut the_rest = None;
-    let s = split_once(&tokens_string, "% % my prelude");
-    if let Some(prelude_check) = s {
-        if let Some((prelude_body, rest)) = split_once(prelude_check.1, "prelude my % %") {
-            // prelude_string = prelude_body.to_string();
-            the_rest = Some(rest);
+    // Figure out what the repeated body tempalte is
+    let rep_body_string;
+    match (prelude_ident, postlude_ident) {
+        (None, None) => {
+            let body_captures = SIMPLE_BODY_RE.captures(&tokens_string).unwrap();
+            rep_body_string = (&body_captures["body"]).to_string();
+            println!("SIMPLE_BODY_RE: {}", rep_body_string);
+        }
+        (Some(prelude_ident), Some(postlude_ident)) => {
+            let body_re = Regex::new(&format!(r"(?xs)
+            ^\s*?%\s*?%\s*?{}\s*?prelude\s(?P<prelude>.*)\sprelude\s*?{}\s*?%\s*?%       # Prelude
+            (?P<body>.*?)                                                                # Repitition Body
+            %\s*?%\s*?{}\s*?postlude\s(?P<postlude>.*)\spostlude\s*?{}\s*?%\s*?%\s*?$    # Postlude",
+            prelude_ident, prelude_ident, postlude_ident, postlude_ident)).unwrap();
+            let body_captures = body_re.captures(&tokens_string).unwrap();
+            rep_body_string = (&body_captures["body"]).to_string();
+            println!("BODY_RE: {}", rep_body_string);
+        }
+        (Some(prelude_ident), None) => {
+            let body_re = Regex::new(&format!(r"(?xs)
+            ^\s*?%\s*?%\s*?{}\s*?prelude\s(?P<prelude>.*)\sprelude\s*?{}\s*?%\s*?%       # Prelude
+            (?P<body>.*?)                                                                # Repitition Body",
+            prelude_ident, prelude_ident)).unwrap();
+            let body_captures = body_re.captures(&tokens_string).unwrap();
+            rep_body_string = (&body_captures["body"]).to_string();
+            println!("BODY_RE: {}", rep_body_string);
+        }
+        (None, Some(postlude_ident)) => {
+            let body_re = Regex::new(&format!(r"(?xs)
+            (?P<body>.*?)                                                                # Repitition Body
+            %\s*?%\s*?{}\s*?postlude\s(?P<postlude>.*)\spostlude\s*?{}\s*?%\s*?%\s*?$    # Postlude",
+            postlude_ident, postlude_ident)).unwrap();
+            let body_captures = body_re.captures(&tokens_string).unwrap();
+            rep_body_string = (&body_captures["body"]).to_string();
+            println!("BODY_RE: {}", rep_body_string);
         }
     }
 
-    let s = split_once(
-        if let Some(st) = the_rest {
-            st
-        } else {
-            &tokens_string
-        },
-        "% % my postlude",
+    // TODO: Get the generated tokenstreams to use the spans from the original tokenstream so that we can indicate syntax errors more easily!
+    let rep_body_tokenstream = TokenStream::from(
+        rep_body_string
+            .parse::<proc_macro2::TokenStream>()
+            .unwrap_or_else(|e| {
+                let e: syn::Error = e.into();
+                e.to_compile_error()
+            }),
     );
-    if let Some(postlude_check) = s {
-        the_rest = Some(postlude_check.0);
-        // if let Some((postlude_body, _)) = split_once(postlude_check.1, "postlude % %") {
-        //     postlude_string = postlude_body.to_string();
-        // }
-    }
-
-    if let Some(rep_body) = the_rest {
-        let rep_body_tokenstream = TokenStream::from(
-            rep_body
-                .parse::<proc_macro2::TokenStream>()
-                .unwrap_or_else(|e| {
-                    let e: syn::Error = e.into();
-                    e.to_compile_error()
-                }),
-        );
-        let repitition_definition: RepeatDefinition = parse_macro_input!(rep_body_tokenstream);
-        generate_repititions(prelude_string, repitition_definition, postlude_string)
-            .unwrap_or_else(|e| TokenStream::from(e.to_compile_error()))
-    } else {
-        let repitition_definition: RepeatDefinition = parse_macro_input!(repeated_tokens);
-        generate_repititions(prelude_string, repitition_definition, postlude_string)
-            .unwrap_or_else(|e| TokenStream::from(e.to_compile_error()))
-    }
+    let repitition_definition: RepeatDefinition = parse_macro_input!(rep_body_tokenstream);
+    generate_repititions(prelude_string, repitition_definition, postlude_string)
+        .unwrap_or_else(|e| TokenStream::from(e.to_compile_error()))
 }
 
 fn generate_repititions(
