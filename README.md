@@ -70,3 +70,5 @@ This will print `3333` to the console.
 Tests and a warning/error free build.
 
 I'd like to improve error handling in the case you have a prelude or postlude defined to match the error handling you get without them.
+
+Another nice to have would be to support iteration over something other than integers.
