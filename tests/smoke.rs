@@ -1,3 +1,5 @@
+use std::mem;
+
 use repeated::repeated;
 
 #[test]
@@ -97,4 +99,21 @@ fn works_to_define_functions_with_x_params() {
     );
 
     function(4.0,5.0);
+
+    repeated!(
+    %% s prelude
+    function(
+    prelude s%%
+    for j in [0;1] {%%j%%.into(),}, ""
+    %%e postlude
+    );
+    postlude e%%);
+}
+
+#[test]
+fn works_to_define_variables() {
+    repeated!(for j in [0;1] {
+        let param_%%j%% =%%j%%;
+    });
+    println!("{}", param_0);
 }
