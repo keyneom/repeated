@@ -83,7 +83,7 @@ pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
     if let Some(prelude_ident_captures) = prelude_ident_captures {
         prelude_ident = Some(prelude_ident_captures["prelude_ident"].to_string());
         let prelude_re = Regex::new(&format!(
-            r"(?s)^\s*?%\s*?%\s*?{}\s*?prelude\s(?P<prelude>.*)\sprelude\s*?{}\s*?%\s*?%",
+            r"(?s)^\s*?%\s*?%\s*?{}\s*?prelude\s?(?P<prelude>.*)\s?prelude\s*?{}\s*?%\s*?%",
             prelude_ident.as_ref().unwrap(),
             prelude_ident.as_ref().unwrap()
         ))
@@ -99,7 +99,7 @@ pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
     if let Some(postlude_ident_captures) = postlude_ident_captures {
         postlude_ident = Some(postlude_ident_captures["postlude_ident"].to_string());
         let postlude_re = Regex::new(&format!(
-            r"(?s)%\s*?%\s*?{}\s*?postlude\s(?P<postlude>.*)\spostlude\s*?{}\s*?%\s*?%\s*?$",
+            r"(?s)%\s*?%\s*?{}\s*?postlude\s?(?P<postlude>.*)\s?postlude\s*?{}\s*?%\s*?%\s*?$",
             postlude_ident.as_ref().unwrap(),
             postlude_ident.as_ref().unwrap()
         ))
@@ -109,22 +109,22 @@ pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
         postlude_string = postlude_body.into();
     }
 
-    // Figure out what the repeated body tempalte is
+    // Figure out what the repeated body template is
     let mut rep_body_string = None;
     match (prelude_ident, postlude_ident) {
         (None, None) => {}
         (Some(prelude_ident), Some(postlude_ident)) => {
             let body_re = Regex::new(&format!(r"(?xs)
-            ^\s*?%\s*?%\s*?{}\s*?prelude\s(?P<prelude>.*)\sprelude\s*?{}\s*?%\s*?%       # Prelude
+            ^\s*?%\s*?%\s*?{}\s*?prelude\s?(?P<prelude>.*)\s?prelude\s*?{}\s*?%\s*?%       # Prelude
             (?P<body>.*?)                                                                # Repitition Body
-            %\s*?%\s*?{}\s*?postlude\s(?P<postlude>.*)\spostlude\s*?{}\s*?%\s*?%\s*?$    # Postlude",
+            %\s*?%\s*?{}\s*?postlude\s?(?P<postlude>.*)\s?postlude\s*?{}\s*?%\s*?%\s*?$    # Postlude",
             prelude_ident, prelude_ident, postlude_ident, postlude_ident)).unwrap();
             let body_captures = body_re.captures(&tokens_string).unwrap();
             rep_body_string = Some((&body_captures["body"]).to_string());
         }
         (Some(prelude_ident), None) => {
             let body_re = Regex::new(&format!(r"(?xs)
-            ^\s*?%\s*?%\s*?{}\s*?prelude\s(?P<prelude>.*)\sprelude\s*?{}\s*?%\s*?%       # Prelude
+            ^\s*?%\s*?%\s*?{}\s*?prelude\s?(?P<prelude>.*)\s?prelude\s*?{}\s*?%\s*?%       # Prelude
             (?P<body>.*?)                                                                # Repitition Body",
             prelude_ident, prelude_ident)).unwrap();
             let body_captures = body_re.captures(&tokens_string).unwrap();
@@ -133,7 +133,7 @@ pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
         (None, Some(postlude_ident)) => {
             let body_re = Regex::new(&format!(r"(?xs)
             (?P<body>.*?)                                                                # Repitition Body
-            %\s*?%\s*?{}\s*?postlude\s(?P<postlude>.*)\spostlude\s*?{}\s*?%\s*?%\s*?$    # Postlude",
+            %\s*?%\s*?{}\s*?postlude\s?(?P<postlude>.*)\s?postlude\s*?{}\s*?%\s*?%\s*?$    # Postlude",
             postlude_ident, postlude_ident)).unwrap();
             let body_captures = body_re.captures(&tokens_string).unwrap();
             rep_body_string = Some((&body_captures["body"]).to_string());
@@ -174,7 +174,7 @@ fn generate_repititions(
     // Generate string versions of repeated tokenstream
     let replacement_id = repitition_definition.replacement_id.to_string();
     let repeated_block: String = repitition_definition.repeat_block.to_string();
-    let mut repeated_blocks = vec![prelude_string];
+    let mut repeated_blocks = if prelude_string.is_empty() { Vec::new() } else { vec![prelude_string] };
     for i in (start..=end).step_by(step) {
         let new_block = repeated_block
             .replace(&format!(" % % {} % % ", replacement_id), &format!("{}", i))
@@ -182,7 +182,10 @@ fn generate_repititions(
             .replace(&format!("%%{}%%", replacement_id), &format!("{}", i));
         repeated_blocks.push(new_block);
     }
-    repeated_blocks.push(postlude_string);
+    
+    if !postlude_string.is_empty() {
+        repeated_blocks.push(postlude_string);
+    }
 
     // Build final tokenstream by joining all repeated tokenstreams with the prelude and the postlude
     let separator = repitition_definition.separator.value();

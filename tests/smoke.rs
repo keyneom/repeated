@@ -87,3 +87,14 @@ fn works_to_create_values_on_a_single_line() {
     repeated!(for i in [0;4;2] { println!("%%i%%"); }, "");
     println!("Tested match position! Here is n: {}", n);
 }
+
+#[test]
+fn works_to_define_functions_with_x_params() {
+    repeated!(
+        %%s prelude let function: fn( prelude s%%
+        for j in [0;1] {f64,},""
+        %%e postlude ) -> f64 = |x,y| { x+y }; postlude e%%
+    );
+
+    function(4.0,5.0);
+}
