@@ -1,5 +1,3 @@
-use std::mem;
-
 use repeated::repeated;
 
 #[test]
@@ -116,4 +114,32 @@ fn works_to_define_variables() {
         let param_%%j%% =%%j%%;
     });
     println!("{}", param_0);
+}
+
+repeated!(
+    for j in [0;255] {
+        fn repeat_%%j%%() {
+            repeated!(for i in [0;%%j%%] { println!("%%i%%"); });
+        }
+    }
+);
+
+#[test]
+fn large_expansions_are_still_performant() {
+    let x = 128;
+    repeated!(
+        %%s prelude
+        match x {
+        prelude s%%
+        for j in [0;255] {
+            %%j%% => {
+                repeat_%%j%%();
+            }
+        }
+        %%e postlude
+            _ => {
+                println!("No match was found!!");
+            }
+        }
+        postlude e%%);
 }

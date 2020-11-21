@@ -65,7 +65,58 @@ repeated!(
 ```
 This will print `3333` to the console.
 
-### Contribution guidelines ###
+## Performance ##
+Large repititions can become very slow to compile if you aren't careful. It can be beneficial to slowly increment the number of repititions to the number you would like instead of immediately setting the number of repititions to the final number immediately. If you find that compile times are being significantly impacted it might be useful to avoid large functions. As an example, the following code takes an extremely large amount of time to compile and might simply error out at some point:
+```rust
+repeated!(
+    %%s prelude
+    match x {
+    prelude s%%
+    for j in [0;255] {
+        %%j%% => {
+            repeated!(for i in [0;%%j%%] { println!("%%i%%"); });
+        }
+    }
+    %%e postlude
+        _ => {
+            println!("No match was found!!");
+        }
+    }
+    postlude e%%);
+```
+The above code creates a match statement that has more than 32,000 `println!` statements in it. Having all of this in a single function can slow down the compiler significantly. Instead we can refactor the code above to an example we have in the tests:
+```rust
+repeated!(
+    for j in [0;255] {
+        fn repeat_%%j%%() {
+            repeated!(for i in [0;%%j%%] { println!("%%i%%"); });
+        }
+    }
+);
+
+#[test]
+fn large_expansions_are_still_performant() {
+    let x = 128;
+    repeated!(
+        %%s prelude
+        match x {
+        prelude s%%
+        for j in [0;255] {
+            %%j%% => {
+                repeat_%%j%%();
+            }
+        }
+        %%e postlude
+            _ => {
+                println!("No match was found!!");
+            }
+        }
+        postlude e%%);
+}
+```
+We still have a nested repeat statement but this time we are defining separate functions that execute the `println!`'s. The repeated match branches now no longer have hundreds of lines of code within them but instead only contain a simple call to one of the functions we've defined. This code compiles much faster than the previous example.
+
+## Contribution guidelines ##
 
 Tests and a warning/error free build.
 
