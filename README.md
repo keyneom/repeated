@@ -46,7 +46,7 @@ Finally, there are certain scenarios where it isn't valid to make a call to a ma
 In the example below you can see how you can continue to make use of the repeated macro even when attempting to create similar match branches.
 You can define a `prelude` or a `postlude` to your main for body. In order to do so, you must provide an identifier for your pre/post-lude.
 The example below provides an example of defining a prelude and postlude that each use the identifier of `my`.
-```
+```rust
 let t = 3;
 repeated!(
     %% my prelude
