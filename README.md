@@ -16,7 +16,7 @@ println!("{:?}", v);
 ```
 
 After defining your for loop to describe your repeated block you can pass a string literal to describe how each repitition should be joined to the prior iteration. Here we use an empty string literal to keep each repitition next to each other.
-We first create an int `n` with a value of `111` and continue on to define another repeated block. The second repeated block has an option third parameter on the range definition indicating the step by which we should be incrementing.
+We first create an int `n` with a value of `111` and continue on to define another repeated block. The second call to repeated has an optional third parameter defined on the range definition (the array looking syntax immediately following the `in` keyword) indicating the step by which we should be incrementing.
 ```rust
 let n = repeated!(for _unused in [0;3] {1}, "");
 repeated!(for i in [0;4;2] { println!("%%i%%"); }, "");
