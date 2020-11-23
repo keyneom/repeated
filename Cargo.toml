@@ -53,3 +53,4 @@ syn = { version= "1", features = ["full"] }
 proc-macro2 = "1"
 regex = "1"
 lazy_static = "1"
+flame = "0.2.2"

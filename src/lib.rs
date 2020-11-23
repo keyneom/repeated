@@ -1,5 +1,8 @@
 #[macro_use]
 extern crate lazy_static;
+mod ident_parser;
+use ident_parser::parse_identifier;
+use std::fs::File;
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use regex::Regex;
@@ -24,6 +27,7 @@ struct RepeatRange {
 
 impl Parse for RepeatRange {
     fn parse(input: ParseStream) -> Result<Self> {
+        let _repeated_flame = flame::start_guard("RepeatRange::parse");
         let range;
         let _ = bracketed!(range in input);
         let mut range: Vec<_> =
@@ -41,6 +45,7 @@ impl Parse for RepeatRange {
 
 impl Parse for RepeatDefinition {
     fn parse(input: ParseStream) -> Result<Self> {
+        let _repeated_flame = flame::start_guard("RepeatDefinition::parse");
         // Parse repeated for
         let _: Token![for] = input.parse()?;
         let replacement_id: Ident = input.parse()?;
@@ -66,42 +71,46 @@ impl Parse for RepeatDefinition {
 }
 
 lazy_static! {
-    static ref PRELUDE_IDENT_RE: Regex =
-        Regex::new(r"^\s*?%\s*?%\s*?(?P<prelude_ident>\w*?)\s*?prelude\s").unwrap();
-    static ref POSTLUDE_IDENT_RE: Regex =
-        Regex::new(r"\spostlude\s*?(?P<postlude_ident>\w*?)\s*?%\s*?%\s*?$").unwrap();
+    // static ref PRELUDE_IDENT_RE: Regex =
+    //     Regex::new(r"^\s*?%\s*?%\s*?(?P<prelude_ident>\w*?)\s*?prelude\s").unwrap();
+    // static ref POSTLUDE_IDENT_RE: Regex =
+    //     Regex::new(r"\spostlude\s*?(?P<postlude_ident>\w*?)\s*?%\s*?%\s*?$").unwrap();
     static ref SIMPLE_BODY_RE: Regex = Regex::new(r"(?s)(?P<body>.*)").unwrap();
 }
 
 #[proc_macro]
 pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
+    flame::start("repeated");
     let tokens_string = format!("{}", repeated_tokens);
+    // println!("{}", tokens_string);
 
-    let mut prelude_ident = None;
     let mut prelude_string = String::new();
-    let prelude_ident_captures = PRELUDE_IDENT_RE.captures(&tokens_string);
-    if let Some(prelude_ident_captures) = prelude_ident_captures {
-        prelude_ident = Some(prelude_ident_captures["prelude_ident"].to_string());
+    let prelude_ident = flame::span_of("ident prelude", || parse_identifier(tokens_string.chars(), false));
+    // println!("prelude_ident: {:?}", prelude_ident);
+    if let Some(prelude_ident) = &prelude_ident {
+        let _repeated_flame = flame::start_guard("prelude");
+        flame::start("compile prelude");
         let prelude_re = Regex::new(&format!(
             r"(?s)^\s*?%\s*?%\s*?{}\s*?prelude\s?(?P<prelude>.*)\s?prelude\s*?{}\s*?%\s*?%",
-            prelude_ident.as_ref().unwrap(),
-            prelude_ident.as_ref().unwrap()
+            prelude_ident,
+            prelude_ident
         ))
         .unwrap();
-        let prelude_body_captures = prelude_re.captures(&tokens_string);
+        flame::end("compile prelude");
+        let prelude_body_captures = flame::span_of("capture prelude", || prelude_re.captures(&tokens_string));
         let prelude_body = &prelude_body_captures.unwrap()["prelude"];
         prelude_string = prelude_body.into();
     }
 
-    let mut postlude_ident = None;
     let mut postlude_string = String::new();
-    let postlude_ident_captures = POSTLUDE_IDENT_RE.captures(&tokens_string);
-    if let Some(postlude_ident_captures) = postlude_ident_captures {
-        postlude_ident = Some(postlude_ident_captures["postlude_ident"].to_string());
+    let postlude_ident = flame::span_of("ident postlude", || parse_identifier(tokens_string.chars(), true));
+    // println!("postlude_ident: {:?}", postlude_ident);
+    if let Some(postlude_ident) = &postlude_ident {
+        let _repeated_flame = flame::start_guard("postlude");
         let postlude_re = Regex::new(&format!(
             r"(?s)%\s*?%\s*?{}\s*?postlude\s?(?P<postlude>.*)\s?postlude\s*?{}\s*?%\s*?%\s*?$",
-            postlude_ident.as_ref().unwrap(),
-            postlude_ident.as_ref().unwrap()
+            postlude_ident,
+            postlude_ident
         ))
         .unwrap();
         let postlude_body_captures = postlude_re.captures(&tokens_string);
@@ -114,6 +123,7 @@ pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
     match (prelude_ident, postlude_ident) {
         (None, None) => {}
         (Some(prelude_ident), Some(postlude_ident)) => {
+            let _repeated_flame = flame::start_guard("body_both");
             let body_re = Regex::new(&format!(r"(?xs)
             ^\s*?%\s*?%\s*?{}\s*?prelude\s?(?P<prelude>.*)\s?prelude\s*?{}\s*?%\s*?%       # Prelude
             (?P<body>.*?)                                                                # Repitition Body
@@ -123,6 +133,7 @@ pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
             rep_body_string = Some((&body_captures["body"]).to_string());
         }
         (Some(prelude_ident), None) => {
+            let _repeated_flame = flame::start_guard("body prelude");
             let body_re = Regex::new(&format!(r"(?xs)
             ^\s*?%\s*?%\s*?{}\s*?prelude\s?(?P<prelude>.*)\s?prelude\s*?{}\s*?%\s*?%       # Prelude
             (?P<body>.*?)                                                                # Repitition Body",
@@ -131,6 +142,7 @@ pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
             rep_body_string = Some((&body_captures["body"]).to_string());
         }
         (None, Some(postlude_ident)) => {
+            let _repeated_flame = flame::start_guard("body postlude");
             let body_re = Regex::new(&format!(r"(?xs)
             (?P<body>.*?)                                                                # Repitition Body
             %\s*?%\s*?{}\s*?postlude\s?(?P<postlude>.*)\s?postlude\s*?{}\s*?%\s*?%\s*?$    # Postlude",
@@ -141,6 +153,7 @@ pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
     }
 
     let rep_body_tokenstream = if let Some(rep_body_string) = rep_body_string {
+        let _repeated_flame = flame::start_guard("tokenstream body");
         // TODO: Get the generated tokenstreams to use the spans from the original tokenstream so that we can indicate syntax errors more easily!
         TokenStream::from(
             rep_body_string
@@ -151,11 +164,16 @@ pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
                 }),
         )
     } else {
+        let _repeated_flame = flame::start_guard("simple");
         repeated_tokens
     };
     let repitition_definition: RepeatDefinition = parse_macro_input!(rep_body_tokenstream);
-    generate_repititions(prelude_string, repitition_definition, postlude_string)
-        .unwrap_or_else(|e| TokenStream::from(e.to_compile_error()))
+    let r = generate_repititions(prelude_string, repitition_definition, postlude_string)
+        .unwrap_or_else(|e| TokenStream::from(e.to_compile_error()));
+    
+    flame::end("repeated");
+    flame::dump_html(&mut File::create("flame-graph.html").unwrap()).unwrap();
+    r
 }
 
 fn generate_repititions(
@@ -163,6 +181,7 @@ fn generate_repititions(
     repitition_definition: RepeatDefinition,
     postlude_string: String,
 ) -> Result<TokenStream> {
+    let _repeated_flame = flame::start_guard("generate_repititions");
     // Determine our range and step_by parameters for repititions
     let start = repitition_definition.range.low.base10_parse::<u32>()?;
     let end = repitition_definition.range.high.base10_parse::<u32>()?;
@@ -175,6 +194,7 @@ fn generate_repititions(
     let replacement_id = repitition_definition.replacement_id.to_string();
     let repeated_block: String = repitition_definition.repeat_block.to_string();
     let mut repeated_blocks = if prelude_string.is_empty() { Vec::new() } else { vec![prelude_string] };
+    flame::start("replace"); 
     for i in (start..=end).step_by(step) {
         let new_block = repeated_block
             .replace(&format!(" % % {} % % ", replacement_id), &format!("{}", i))
@@ -182,6 +202,7 @@ fn generate_repititions(
             .replace(&format!("%%{}%%", replacement_id), &format!("{}", i));
         repeated_blocks.push(new_block);
     }
+    flame::end("replace");
     
     if !postlude_string.is_empty() {
         repeated_blocks.push(postlude_string);
@@ -189,7 +210,9 @@ fn generate_repititions(
 
     // Build final tokenstream by joining all repeated tokenstreams with the prelude and the postlude
     let separator = repitition_definition.separator.value();
+    flame::start("parse all");
     let repeated_tokenstream: proc_macro2::TokenStream =
         repeated_blocks.join(&separator).parse()?;
+    flame::end("parse all");
     Ok(TokenStream::from(repeated_tokenstream))
 }
