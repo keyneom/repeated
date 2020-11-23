@@ -1,5 +1,3 @@
-use std::{str::Chars, time::Instant};
-
 use repeated::repeated;
 #[macro_use]
 extern crate lazy_static;
@@ -126,16 +124,99 @@ repeated!(
         fn repeat_%%j%%() {
             repeated!(
                 %%s prelude
-                // This is a test!
+                // This is a test! Catch it!
                 prelude s%%
                 for i in [0;%%j%%] { println!("%%i%%"); }
                 %%e postlude
-                // This is another test!
+                // This is another test! Catch it!
                 postlude e%%
             );
         }
     }
 );
+
+use std::{fmt::Display, collections::HashMap, error, fmt::{self, Formatter}, mem, str::Chars, time::Instant};
+type ReturnFunction = dyn Fn(&HashMap<String, &[f64]>, usize) -> Result<Vec<f64>, Error>;
+
+/// Error types for cruncher
+#[derive(Debug, Clone, PartialEq)]
+pub enum Error {
+    /// Error while parsing an expression
+    ParseError(String),
+    /// Unknown variable during evaluation
+    NameError(String),
+}
+
+impl Display for Error {
+    fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
+        match *self {
+            Self::ParseError(ref message) => write!(fmt, "ParseError: {}", message),
+            Self::NameError(ref message) => write!(fmt, "NameError: {}", message),
+        }
+    }
+}
+
+impl error::Error for Error {
+    #[must_use]
+    fn description(&self) -> &str {
+        match *self {
+            Self::ParseError(ref message) | Self::NameError(ref message) => message,
+        }
+    }
+
+    #[must_use]
+    fn cause(&self) -> Option<&dyn error::Error> {
+        match *self {
+            Self::ParseError(_) | Self::NameError(_) => None,
+        }
+    }
+}
+repeated!(for i in [1;255] {
+    fn fn_with_%%i%%(function: *const u8, sorted_keys: Vec<String>) -> Box<ReturnFunction> {
+        let function = repeated!(
+            %% s prelude
+            unsafe {
+            mem::transmute::<_, fn(
+            prelude s%%
+            for j in [1;%%i%%] {f64,}, ""
+            %% e postlude
+            ) -> f64>(function)
+            }
+            postlude e %%);
+        Box::new(
+            move |params: &HashMap<String, &[f64]>, number_of_evaluations: usize| {
+                let mut results: Vec<f64> = Vec::with_capacity(number_of_evaluations);
+                repeated!(for j in [1;%%i%%] {
+                    let param_%%j%% = params.get(&sorted_keys[%%j%%-1]).ok_or_else(|| {
+                        Error::NameError(format!("Missing parameter: {}", &sorted_keys[%%j%%-1]))
+                    })?;
+                });
+
+                // Ensure all the slices have at least as much data as necessary to do the requested number of evaluations
+                for k in &sorted_keys {
+                    if number_of_evaluations > params[k].len() {
+                        return Err(Error::NameError(format!(
+                            "Missing data for parameter: {}",
+                            k
+                        )));
+                    }
+                }
+                for i in 0..number_of_evaluations {
+                    repeated!(
+                    %%s prelude
+                    results.push(function(
+                    prelude s%%
+                    for j in [1;%%i%%] {param_%%j%%[i],}, ""
+                    %%e postlude
+                    ));
+                    postlude e%%);
+                }
+                Ok(results)
+            },
+        )
+    }
+});
+
 
 #[test]
 fn large_expansions_are_still_performant() {

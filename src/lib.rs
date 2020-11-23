@@ -1,8 +1,8 @@
 #[macro_use]
 extern crate lazy_static;
+use std::{fs::File, collections::HashMap, sync::RwLock};
 mod ident_parser;
 use ident_parser::parse_identifier;
-use std::fs::File;
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use regex::Regex;
@@ -71,11 +71,19 @@ impl Parse for RepeatDefinition {
 }
 
 lazy_static! {
-    // static ref PRELUDE_IDENT_RE: Regex =
-    //     Regex::new(r"^\s*?%\s*?%\s*?(?P<prelude_ident>\w*?)\s*?prelude\s").unwrap();
-    // static ref POSTLUDE_IDENT_RE: Regex =
-    //     Regex::new(r"\spostlude\s*?(?P<postlude_ident>\w*?)\s*?%\s*?%\s*?$").unwrap();
+    static ref PRELUDE_IDENT_RE: Regex =
+        Regex::new(r"^\s*?%\s*?%\s*?(?P<prelude_ident>\w*?)\s*?prelude\s").unwrap();
+    static ref POSTLUDE_IDENT_RE: Regex =
+        Regex::new(r"\spostlude\s*?(?P<postlude_ident>\w*?)\s*?%\s*?%\s*?$").unwrap();
     static ref SIMPLE_BODY_RE: Regex = Regex::new(r"(?s)(?P<body>.*)").unwrap();
+    static ref PRELUDE_REGEX_CACHE: RwLock<HashMap<String, Regex>> = RwLock::new(HashMap::new());
+    static ref POSTLUDE_REGEX_CACHE: RwLock<HashMap<String, Regex>> = RwLock::new(HashMap::new());
+    static ref BODY_BOTH_REGEX_CACHE: RwLock<HashMap<(String, String), Regex>> =
+        RwLock::new(HashMap::new());
+    static ref BODY_PRELUDE_REGEX_CACHE: RwLock<HashMap<String, Regex>> =
+        RwLock::new(HashMap::new());
+    static ref BODY_POSTLUDE_REGEX_CACHE: RwLock<HashMap<String, Regex>> =
+        RwLock::new(HashMap::new());
 }
 
 #[proc_macro]
@@ -84,36 +92,58 @@ pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
     let tokens_string = format!("{}", repeated_tokens);
     // println!("{}", tokens_string);
 
+    // let mut prelude_ident = None;
     let mut prelude_string = String::new();
-    let prelude_ident = flame::span_of("ident prelude", || parse_identifier(tokens_string.chars(), false));
-    // println!("prelude_ident: {:?}", prelude_ident);
+    let prelude_ident = parse_identifier(tokens_string.chars(), false);
     if let Some(prelude_ident) = &prelude_ident {
-        let _repeated_flame = flame::start_guard("prelude");
-        flame::start("compile prelude");
-        let prelude_re = Regex::new(&format!(
-            r"(?s)^\s*?%\s*?%\s*?{}\s*?prelude\s?(?P<prelude>.*)\s?prelude\s*?{}\s*?%\s*?%",
-            prelude_ident,
-            prelude_ident
-        ))
-        .unwrap();
-        flame::end("compile prelude");
-        let prelude_body_captures = flame::span_of("capture prelude", || prelude_re.captures(&tokens_string));
+        // prelude_ident = Some(prelude_ident_captures["prelude_ident"].to_string());
+        let regex_cache = PRELUDE_REGEX_CACHE.read().unwrap();
+        let prelude_re = regex_cache.get(prelude_ident);
+        let prelude_body_captures = if let None = prelude_re {
+            drop(regex_cache);
+            PRELUDE_REGEX_CACHE
+                .write()
+                .unwrap()
+                .entry(prelude_ident.to_string())
+                .or_insert_with(|| {
+                    Regex::new(&format!(
+                r"(?s)^\s*?%\s*?%\s*?{}\s*?prelude\s?(?P<prelude>.*)\s?prelude\s*?{}\s*?%\s*?%",
+                prelude_ident,
+                prelude_ident
+            ))
+            .unwrap()
+                })
+                .captures(&tokens_string)
+        } else {
+            prelude_re.unwrap().captures(&tokens_string)
+        };
         let prelude_body = &prelude_body_captures.unwrap()["prelude"];
         prelude_string = prelude_body.into();
     }
 
+    // let mut postlude_ident = None;
     let mut postlude_string = String::new();
-    let postlude_ident = flame::span_of("ident postlude", || parse_identifier(tokens_string.chars(), true));
-    // println!("postlude_ident: {:?}", postlude_ident);
+    let postlude_ident = parse_identifier(tokens_string.chars(), true);
     if let Some(postlude_ident) = &postlude_ident {
-        let _repeated_flame = flame::start_guard("postlude");
-        let postlude_re = Regex::new(&format!(
-            r"(?s)%\s*?%\s*?{}\s*?postlude\s?(?P<postlude>.*)\s?postlude\s*?{}\s*?%\s*?%\s*?$",
-            postlude_ident,
-            postlude_ident
-        ))
-        .unwrap();
-        let postlude_body_captures = postlude_re.captures(&tokens_string);
+        // postlude_ident = Some(postlude_ident_captures["postlude_ident"].to_string());
+        let regex_cache = POSTLUDE_REGEX_CACHE.read().unwrap();
+        let postlude_re = regex_cache.get(postlude_ident);
+        let postlude_body_captures = if let None = postlude_re {
+            drop(regex_cache);
+            POSTLUDE_REGEX_CACHE
+                .write()
+                .unwrap()
+                .entry(postlude_ident.to_string())
+                .or_insert_with(|| {
+                    Regex::new(&format!(
+                        r"(?s)%\s*?%\s*?{}\s*?postlude\s?(?P<postlude>.*)\s?postlude\s*?{}\s*?%\s*?%\s*?$",
+                        postlude_ident,
+                        postlude_ident
+        )).unwrap()
+                }).captures(&tokens_string)
+        } else {
+            postlude_re.unwrap().captures(&tokens_string)
+        };
         let postlude_body = &postlude_body_captures.unwrap()["postlude"];
         postlude_string = postlude_body.into();
     }
@@ -123,31 +153,64 @@ pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
     match (prelude_ident, postlude_ident) {
         (None, None) => {}
         (Some(prelude_ident), Some(postlude_ident)) => {
-            let _repeated_flame = flame::start_guard("body_both");
-            let body_re = Regex::new(&format!(r"(?xs)
-            ^\s*?%\s*?%\s*?{}\s*?prelude\s?(?P<prelude>.*)\s?prelude\s*?{}\s*?%\s*?%       # Prelude
-            (?P<body>.*?)                                                                # Repitition Body
-            %\s*?%\s*?{}\s*?postlude\s?(?P<postlude>.*)\s?postlude\s*?{}\s*?%\s*?%\s*?$    # Postlude",
-            prelude_ident, prelude_ident, postlude_ident, postlude_ident)).unwrap();
-            let body_captures = body_re.captures(&tokens_string).unwrap();
+            let regex_cache = BODY_BOTH_REGEX_CACHE.read().unwrap();
+            let body_re = regex_cache.get(&(prelude_ident.clone(), postlude_ident.clone()));
+            let body_captures = if let None = body_re {
+                drop(regex_cache);
+                BODY_BOTH_REGEX_CACHE
+                .write()
+                .unwrap()
+                .entry((prelude_ident.clone(), postlude_ident.clone()))
+                .or_insert_with(|| {
+                    Regex::new(&format!(r"(?xs)
+                        ^\s*?%\s*?%\s*?{}\s*?prelude\s?(?P<prelude>.*)\s?prelude\s*?{}\s*?%\s*?%       # Prelude
+                        (?P<body>.*?)                                                                # Repitition Body
+                        %\s*?%\s*?{}\s*?postlude\s?(?P<postlude>.*)\s?postlude\s*?{}\s*?%\s*?%\s*?$    # Postlude",
+                        prelude_ident, prelude_ident, postlude_ident, postlude_ident)).unwrap()
+                }).captures(&tokens_string).unwrap()
+            } else {
+                body_re.unwrap().captures(&tokens_string).unwrap()
+            };
             rep_body_string = Some((&body_captures["body"]).to_string());
         }
         (Some(prelude_ident), None) => {
-            let _repeated_flame = flame::start_guard("body prelude");
-            let body_re = Regex::new(&format!(r"(?xs)
+            let regex_cache = BODY_PRELUDE_REGEX_CACHE.read().unwrap();
+            let body_re = regex_cache.get(&prelude_ident);
+            let body_captures = if let None = body_re {
+                drop(regex_cache);
+                BODY_PRELUDE_REGEX_CACHE
+                .write()
+                .unwrap()
+                .entry(prelude_ident.clone())
+                .or_insert_with(|| {
+                    Regex::new(&format!(r"(?xs)
             ^\s*?%\s*?%\s*?{}\s*?prelude\s?(?P<prelude>.*)\s?prelude\s*?{}\s*?%\s*?%       # Prelude
             (?P<body>.*?)                                                                # Repitition Body",
-            prelude_ident, prelude_ident)).unwrap();
-            let body_captures = body_re.captures(&tokens_string).unwrap();
+            prelude_ident, prelude_ident)).unwrap()
+        }).captures(&tokens_string).unwrap()
+            } else {
+                body_re.unwrap().captures(&tokens_string).unwrap()
+            };
             rep_body_string = Some((&body_captures["body"]).to_string());
         }
         (None, Some(postlude_ident)) => {
-            let _repeated_flame = flame::start_guard("body postlude");
-            let body_re = Regex::new(&format!(r"(?xs)
+            let regex_cache = BODY_POSTLUDE_REGEX_CACHE.read().unwrap();
+            let body_re = regex_cache.get(&postlude_ident);
+            let body_captures = if let None = body_re {
+                drop(regex_cache);
+                BODY_POSTLUDE_REGEX_CACHE
+                .write()
+                .unwrap()
+                .entry(postlude_ident.clone())
+                .or_insert_with(|| {
+                    Regex::new(&format!(r"(?xs)
             (?P<body>.*?)                                                                # Repitition Body
             %\s*?%\s*?{}\s*?postlude\s?(?P<postlude>.*)\s?postlude\s*?{}\s*?%\s*?%\s*?$    # Postlude",
-            postlude_ident, postlude_ident)).unwrap();
-            let body_captures = body_re.captures(&tokens_string).unwrap();
+            postlude_ident, postlude_ident)).unwrap()
+        }).captures(&tokens_string).unwrap()
+            } else {
+                body_re.unwrap().captures(&tokens_string).unwrap()
+            };
             rep_body_string = Some((&body_captures["body"]).to_string());
         }
     }
@@ -193,8 +256,11 @@ fn generate_repititions(
     // Generate string versions of repeated tokenstream
     let replacement_id = repitition_definition.replacement_id.to_string();
     let repeated_block: String = repitition_definition.repeat_block.to_string();
-    let mut repeated_blocks = if prelude_string.is_empty() { Vec::new() } else { vec![prelude_string] };
-    flame::start("replace"); 
+    let mut repeated_blocks = if prelude_string.is_empty() {
+        Vec::new()
+    } else {
+        vec![prelude_string]
+    };
     for i in (start..=end).step_by(step) {
         let new_block = repeated_block
             .replace(&format!(" % % {} % % ", replacement_id), &format!("{}", i))
@@ -202,8 +268,6 @@ fn generate_repititions(
             .replace(&format!("%%{}%%", replacement_id), &format!("{}", i));
         repeated_blocks.push(new_block);
     }
-    flame::end("replace");
-    
     if !postlude_string.is_empty() {
         repeated_blocks.push(postlude_string);
     }
