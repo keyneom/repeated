@@ -122,4 +122,6 @@ Tests and a warning/error free build.
 
 I'd like to improve error handling in the case you have a prelude or postlude defined to match the error handling you get without them.
 
-Another nice to have would be to support iteration over something other than integers.
+Generating the repitition blocks' tokenstreams is still quiet slow in some cases. I believe this is primarily a result of the string based parsing that is currently being used to create the repeated tokens. Switching to creating cloned tokenstreams within the repeated blocks would likely be faster and solve our current error reporting issues when a prelude or postlude is present.
+
+Another nice to have would be to support iteration over an explicitly enumerated list of values. In essence, instead of using a `RepeatRange` definition of `[0;6;2]` to repeat with `0,2,4,6` you could pass a `[0,2,4,6]` to get the same effect. This provides more flexibility in that you can define values that are not simply incremented by some constant amount, but it can be much less friendly when needing to provide a large number of repititions. This can come in handy when creating duplicate impls for `u8`,`u16`,`u32`,`u64`, etc. In particular this is beneficial because it allows for the use of non-numeric identifiers, such as `[frank, bill, ted]`.
