@@ -92,7 +92,10 @@ lazy_static! {
 pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
     flame::start("repeated");
     let tokens_string = format!("{}", repeated_tokens);
-    // println!("{}", tokens_string);
+    for rt in repeated_tokens {
+        println!("{:?}", rt);
+    }
+    println!("{}", tokens_string);
 
     // let mut prelude_ident = None;
     let mut prelude_string = String::new();
@@ -230,7 +233,8 @@ pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
         )
     } else {
         let _repeated_flame = flame::start_guard("simple");
-        repeated_tokens
+        // repeated_tokens
+        TokenStream::new()
     };
     let repitition_definition: RepeatDefinition = parse_macro_input!(rep_body_tokenstream);
     let r = generate_repititions(prelude_string, repitition_definition, postlude_string)
