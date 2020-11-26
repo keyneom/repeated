@@ -1,6 +1,6 @@
 #[macro_use]
 extern crate lazy_static;
-use std::{fs::File, collections::HashMap, sync::RwLock};
+use std::{collections::HashMap, fs::File, sync::RwLock};
 mod ident_parser;
 use ident_parser::parse_identifier;
 use proc_macro::TokenStream;
@@ -83,6 +83,8 @@ lazy_static! {
     static ref BODY_PRELUDE_REGEX_CACHE: RwLock<HashMap<String, Regex>> =
         RwLock::new(HashMap::new());
     static ref BODY_POSTLUDE_REGEX_CACHE: RwLock<HashMap<String, Regex>> =
+        RwLock::new(HashMap::new());
+    static ref REPITITION_ID_REGEX_CACHE: RwLock<HashMap<String, Regex>> =
         RwLock::new(HashMap::new());
 }
 
@@ -233,7 +235,7 @@ pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
     let repitition_definition: RepeatDefinition = parse_macro_input!(rep_body_tokenstream);
     let r = generate_repititions(prelude_string, repitition_definition, postlude_string)
         .unwrap_or_else(|e| TokenStream::from(e.to_compile_error()));
-    
+
     flame::end("repeated");
     flame::dump_html(&mut File::create("flame-graph.html").unwrap()).unwrap();
     r
@@ -255,6 +257,20 @@ fn generate_repititions(
 
     // Generate string versions of repeated tokenstream
     let replacement_id = repitition_definition.replacement_id.to_string();
+    let replacement_id_regex_replacer_cache = REPITITION_ID_REGEX_CACHE.read().unwrap();
+    let replacement_id_regex_replacer = replacement_id_regex_replacer_cache.get(&replacement_id);
+    let mut replacement_id_write_cache;
+    let replacement_id_regex_replacer = if let None = replacement_id_regex_replacer {
+        drop(replacement_id_regex_replacer_cache);
+        replacement_id_write_cache = REPITITION_ID_REGEX_CACHE.write().unwrap();
+        replacement_id_write_cache
+            .entry(replacement_id.clone())
+            .or_insert_with(|| {
+                Regex::new(&format!(r"\s*?%\s*?%\s*?{}\s*?%\s*?%\s*?", replacement_id)).unwrap()
+            })
+    } else {
+        replacement_id_regex_replacer.unwrap()
+    };
     let repeated_block: String = repitition_definition.repeat_block.to_string();
     let mut repeated_blocks = if prelude_string.is_empty() {
         Vec::new()
@@ -262,11 +278,9 @@ fn generate_repititions(
         vec![prelude_string]
     };
     for i in (start..=end).step_by(step) {
-        let new_block = repeated_block
-            .replace(&format!(" % % {} % % ", replacement_id), &format!("{}", i))
-            .replace(&format!("% % {} % %", replacement_id), &format!("{}", i))
-            .replace(&format!("%%{}%%", replacement_id), &format!("{}", i));
-        repeated_blocks.push(new_block);
+        let new_block =
+            replacement_id_regex_replacer.replace_all(&repeated_block, i.to_string().as_str());
+        repeated_blocks.push(new_block.into());
     }
     if !postlude_string.is_empty() {
         repeated_blocks.push(postlude_string);

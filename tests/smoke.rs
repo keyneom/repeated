@@ -1,3 +1,5 @@
+use std::{str::Chars, time::Instant};
+
 use repeated::repeated;
 #[macro_use]
 extern crate lazy_static;
@@ -135,7 +137,7 @@ repeated!(
     }
 );
 
-use std::{fmt::Display, collections::HashMap, error, fmt::{self, Formatter}, mem, str::Chars, time::Instant};
+use std::{fmt::Display, collections::HashMap, error, fmt::{self, Formatter}, mem};
 type ReturnFunction = dyn Fn(&HashMap<String, &[f64]>, usize) -> Result<Vec<f64>, Error>;
 
 /// Error types for cruncher
@@ -262,6 +264,10 @@ fn large_expansions_are_still_performant() {
 
 //     let pre_captures = pre_regex.captures(test_string);
 //     let post_captures = post_regex.captures(test_string);
+
+//     let repeat_block_replacer = Regex::new(r"\s*?%\s*?%\s*?j\s*?%\s*?%\s*?").unwrap();
+//     let replaced = repeat_block_replacer.replace_all(test_string, "1");
+//     println!("{}", replaced);
 
 //     let prelude = &pre_captures.unwrap()["prelude_ident"];
 //     let postlude = &post_captures.unwrap()["postlude_ident"];
