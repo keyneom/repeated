@@ -1,6 +1,6 @@
 [package]
 name = "repeated"
-version = "0.1.2"
+version = "0.1.3"
 authors = ["Mika Sanchez <keyneom122@hotmail.com>"]
 license = "MIT"
 readme = "README.md"
@@ -8,15 +8,16 @@ description = """
 Allows you to repeat a block of code a number of times.
 """
 
-keywords = ["repeat","code","macro","duplicate","template"]
+keywords = ["repeat", "code", "macro", "duplicate", "template"]
 
 categories = ["rust-patterns"]
 
-documentation = "https://bitbucket.org/keyneom/repeated/"
-homepage = "https://bitbucket.org/keyneom/repeated/"
-repository = "https://bitbucket.org/keyneom/repeated/"
+documentation = "https://docs.rs/repeated"
+homepage = "https://github.com/keyneom/repeated"
+repository = "https://github.com/keyneom/repeated"
 
-edition = "2018"
+edition = "2021"
+rust-version = "1.68"
 
 [badges]
 maintenance = { status = "experimental" }
@@ -25,7 +26,8 @@ maintenance = { status = "experimental" }
 proc-macro = true
 
 [dependencies]
-syn = { version = "1", features = ["full"] }
+# Keep syn lean: we only parse a custom mini-DSL, not the full Rust AST.
+syn = { version = "2", default-features = false, features = ["parsing", "proc-macro", "clone-impls"] }
 proc-macro2 = "1"
 
 [dev-dependencies]
