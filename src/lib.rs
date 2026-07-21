@@ -46,11 +46,11 @@ impl Parse for RepeatRange {
                 step: Some(values[2].clone()),
             }),
             0 | 1 => Err(syn::Error::new(
-                bracket.span,
+                bracket.span.open(),
                 "repeat range requires [low; high] or [low; high; step]",
             )),
             _ => Err(syn::Error::new(
-                bracket.span,
+                bracket.span.open(),
                 "repeat range expects at most three values: [low; high; step]",
             )),
         }
@@ -101,17 +101,21 @@ enum FlatToken {
 
 fn flatten(stream: proc_macro2::TokenStream) -> Vec<FlatToken> {
     let mut out = Vec::new();
+    flatten_into(stream, &mut out);
+    out
+}
+
+fn flatten_into(stream: proc_macro2::TokenStream, out: &mut Vec<FlatToken>) {
     for tt in stream {
         match tt {
             TokenTree::Group(group) => {
                 out.push(FlatToken::Start(group.delimiter(), group.span_open()));
-                out.extend(flatten(group.stream()));
+                flatten_into(group.stream(), out);
                 out.push(FlatToken::End(group.delimiter(), group.span_close()));
             }
             other => out.push(FlatToken::Token(other)),
         }
     }
-    out
 }
 
 fn unflatten(flat: &[FlatToken]) -> Result<proc_macro2::TokenStream> {
@@ -293,7 +297,6 @@ fn split_prelude_postlude(stream: proc_macro2::TokenStream) -> Result<RepeatedIn
         flat.len()
     };
 
-    // The for-body slice is balanced on its own, so it can be re-grouped safely.
     let body_stream = unflatten(&flat[body_start..body_end])?;
     let definition: RepeatDefinition = syn::parse2(body_stream)?;
 
@@ -308,7 +311,6 @@ fn is_percent_tt(tt: &TokenTree) -> bool {
     matches!(tt, TokenTree::Punct(p) if p.as_char() == '%')
 }
 
-/// If `tokens[index..]` starts with `%% <id> %%`, returns the index past the marker.
 fn match_placeholder_at(tokens: &[TokenTree], index: usize, replacement_id: &str) -> Option<usize> {
     if index + 4 >= tokens.len() {
         return None;
@@ -348,7 +350,7 @@ fn substitute_stream(
     value: u32,
 ) -> proc_macro2::TokenStream {
     let tokens: Vec<TokenTree> = input.into_iter().collect();
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(tokens.len());
     let mut i = 0;
 
     while i < tokens.len() {
@@ -389,8 +391,7 @@ fn substitute_stream(
     out.into_iter().collect()
 }
 
-fn flat_to_string(flat: &[FlatToken]) -> String {
-    let mut s = String::new();
+fn push_flat_to_string(flat: &[FlatToken], s: &mut String) {
     for token in flat {
         match token {
             FlatToken::Token(TokenTree::Punct(punct)) => {
@@ -422,7 +423,15 @@ fn flat_to_string(flat: &[FlatToken]) -> String {
             FlatToken::End(Delimiter::None, _) => {}
         }
     }
-    s
+}
+
+fn push_stream_to_string(stream: proc_macro2::TokenStream, s: &mut String) {
+    use std::fmt::Write;
+    let _ = write!(s, "{}", stream);
+}
+
+fn iter_values(start: u32, end: u32, step: usize) -> impl Iterator<Item = u32> {
+    (start..=end).step_by(step)
 }
 
 impl RepeatedInput {
@@ -453,37 +462,88 @@ impl RepeatedInput {
 
         let replacement_id = definition.replacement_id.to_string();
         let separator = definition.separator.value();
+        let count = iter_values(start, end, step).count();
 
-        // Prelude/postlude stay flat so braces opened in the prelude and closed
-        // in the postlude are only re-parsed after joining. Bodies are substituted
-        // via a token-tree walk — preserving empty-separator gluing
-        // (e.g. `{1}` joined with `""` → `1111`).
-        let mut parts: Vec<String> = Vec::new();
-        if !prelude.is_empty() {
-            parts.push(flat_to_string(&prelude));
-        }
-        for value in (start..=end).step_by(step) {
-            let substituted = substitute_stream(
-                definition.repeat_block.clone(),
+        // Empty separator concatenates rendered tokens so adjacent literals/idents
+        // can glue (`1` x4 -> `1111`). That path still needs a string round-trip.
+        if separator.is_empty() {
+            return expand_gluing(
+                &prelude,
+                &postlude,
+                &definition.repeat_block,
                 &replacement_id,
-                value,
+                start,
+                end,
+                step,
+                count,
             );
-            parts.push(substituted.to_string());
-        }
-        if !postlude.is_empty() {
-            parts.push(flat_to_string(&postlude));
         }
 
-        parts
-            .join(&separator)
-            .parse()
-            .map_err(|err: proc_macro2::LexError| {
-                syn::Error::new(
-                    Span::call_site(),
-                    format!("failed to parse expanded tokens: {}", err),
-                )
-            })
+        // Fast path: assemble FlatTokens and unflatten. Whitespace-only separators
+        // (including the default `"\n"`) are insignificant to the Rust lexer and
+        // can be omitted — avoiding TokenStream::to_string + full re-lex.
+        let mut flat = Vec::with_capacity(prelude.len() + postlude.len() + count.saturating_mul(8));
+        flat.extend(prelude);
+
+        let sep_flat = if separator.chars().all(char::is_whitespace) {
+            None
+        } else {
+            let sep_stream: proc_macro2::TokenStream =
+                separator.parse().map_err(|err: proc_macro2::LexError| {
+                    syn::Error::new(
+                        definition.separator.span(),
+                        format!("failed to parse separator tokens: {}", err),
+                    )
+                })?;
+            Some(flatten(sep_stream))
+        };
+
+        let mut first = true;
+        for value in iter_values(start, end, step) {
+            if !first {
+                if let Some(ref sep) = sep_flat {
+                    flat.extend(sep.iter().cloned());
+                }
+            }
+            first = false;
+            let substituted =
+                substitute_stream(definition.repeat_block.clone(), &replacement_id, value);
+            flatten_into(substituted, &mut flat);
+        }
+        flat.extend(postlude);
+
+        unflatten(&flat)
     }
+}
+
+fn expand_gluing(
+    prelude: &[FlatToken],
+    postlude: &[FlatToken],
+    repeat_block: &proc_macro2::TokenStream,
+    replacement_id: &str,
+    start: u32,
+    end: u32,
+    step: usize,
+    count: usize,
+) -> Result<proc_macro2::TokenStream> {
+    let mut buf = String::with_capacity(
+        prelude.len().saturating_mul(4)
+            + postlude.len().saturating_mul(4)
+            + count.saturating_mul(32),
+    );
+    push_flat_to_string(prelude, &mut buf);
+    for value in iter_values(start, end, step) {
+        let substituted = substitute_stream(repeat_block.clone(), replacement_id, value);
+        push_stream_to_string(substituted, &mut buf);
+    }
+    push_flat_to_string(postlude, &mut buf);
+
+    buf.parse().map_err(|err: proc_macro2::LexError| {
+        syn::Error::new(
+            Span::call_site(),
+            format!("failed to parse expanded tokens: {}", err),
+        )
+    })
 }
 
 #[proc_macro]
