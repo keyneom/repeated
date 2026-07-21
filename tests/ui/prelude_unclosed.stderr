@@ -1,0 +1,5 @@
+error: could not find closing prelude marker `prelude broken %%`
+ --> tests/ui/prelude_unclosed.rs:6:12
+  |
+6 |         %% broken prelude
+  |            ^^^^^^
