@@ -1,13 +1,16 @@
-#[macro_use]
-extern crate lazy_static;
 use proc_macro::TokenStream;
-use proc_macro2::Span;
-use regex::Regex;
+use proc_macro2::{Delimiter, Group, Ident, Literal, Spacing, Span, TokenTree};
 use syn::{
     braced, bracketed,
     parse::{Parse, ParseStream},
-    parse_macro_input, Ident, LitInt, LitStr, Result, Token,
+    parse_macro_input, LitInt, LitStr, Result, Token,
 };
+
+struct RepeatedInput {
+    prelude: Vec<FlatToken>,
+    definition: RepeatDefinition,
+    postlude: Vec<FlatToken>,
+}
 
 struct RepeatDefinition {
     replacement_id: Ident,
@@ -24,38 +27,53 @@ struct RepeatRange {
 
 impl Parse for RepeatRange {
     fn parse(input: ParseStream) -> Result<Self> {
-        let range;
-        let _ = bracketed!(range in input);
-        let mut range: Vec<_> =
-            syn::punctuated::Punctuated::<syn::LitInt, Token![;]>::parse_terminated(&range)?
+        let content;
+        let bracket = bracketed!(content in input);
+        let values: Vec<LitInt> =
+            syn::punctuated::Punctuated::<LitInt, Token![;]>::parse_terminated(&content)?
                 .into_iter()
                 .collect();
-        range.reverse();
-        Ok(RepeatRange {
-            low: range.pop().unwrap(),
-            high: range.pop().unwrap(),
-            step: range.pop(),
-        })
+
+        match values.len() {
+            2 => Ok(RepeatRange {
+                low: values[0].clone(),
+                high: values[1].clone(),
+                step: None,
+            }),
+            3 => Ok(RepeatRange {
+                low: values[0].clone(),
+                high: values[1].clone(),
+                step: Some(values[2].clone()),
+            }),
+            0 | 1 => Err(syn::Error::new(
+                bracket.span,
+                "repeat range requires [low; high] or [low; high; step]",
+            )),
+            _ => Err(syn::Error::new(
+                bracket.span,
+                "repeat range expects at most three values: [low; high; step]",
+            )),
+        }
     }
 }
 
 impl Parse for RepeatDefinition {
     fn parse(input: ParseStream) -> Result<Self> {
-        // Parse repeated for
         let _: Token![for] = input.parse()?;
         let replacement_id: Ident = input.parse()?;
         let _: Token![in] = input.parse()?;
         let range: RepeatRange = input.parse()?;
-        let repeat_block;
-        let _ = braced!(repeat_block in input);
-        let repeat_block = repeat_block.parse()?;
+        let block_content;
+        braced!(block_content in input);
+        let repeat_block = block_content.parse()?;
 
-        // Parse Separator if provided
-        let mut separator = LitStr::new("\n", Span::call_site());
-        let expecting_user_separator = input.parse::<Token![,]>();
-        if let Ok(_) = expecting_user_separator {
-            separator = input.parse()?
-        }
+        let separator = if input.peek(Token![,]) {
+            let _: Token![,] = input.parse()?;
+            input.parse()?
+        } else {
+            LitStr::new("\n", Span::call_site())
+        };
+
         Ok(RepeatDefinition {
             replacement_id,
             range,
@@ -65,131 +83,414 @@ impl Parse for RepeatDefinition {
     }
 }
 
-lazy_static! {
-    static ref PRELUDE_IDENT_RE: Regex =
-        Regex::new(r"^\s*?%\s*?%\s*?(?P<prelude_ident>\w*?)\s*?prelude\s").unwrap();
-    static ref POSTLUDE_IDENT_RE: Regex =
-        Regex::new(r"\spostlude\s*?(?P<postlude_ident>\w*?)\s*?%\s*?%\s*?$").unwrap();
-    static ref SIMPLE_BODY_RE: Regex = Regex::new(r"(?s)(?P<body>.*)").unwrap();
+impl Parse for RepeatedInput {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let stream = input.parse::<proc_macro2::TokenStream>()?;
+        split_prelude_postlude(stream)
+    }
+}
+
+/// Flat view of a token stream so prelude/postlude markers can sit across
+/// unbalanced delimiter pairs (e.g. `match x {` in the prelude, `}` in the postlude).
+#[derive(Clone, Debug)]
+enum FlatToken {
+    Token(TokenTree),
+    Start(Delimiter, Span),
+    End(Delimiter, Span),
+}
+
+fn flatten(stream: proc_macro2::TokenStream) -> Vec<FlatToken> {
+    let mut out = Vec::new();
+    for tt in stream {
+        match tt {
+            TokenTree::Group(group) => {
+                out.push(FlatToken::Start(group.delimiter(), group.span_open()));
+                out.extend(flatten(group.stream()));
+                out.push(FlatToken::End(group.delimiter(), group.span_close()));
+            }
+            other => out.push(FlatToken::Token(other)),
+        }
+    }
+    out
+}
+
+fn unflatten(flat: &[FlatToken]) -> Result<proc_macro2::TokenStream> {
+    fn rec(flat: &[FlatToken], index: &mut usize) -> Result<proc_macro2::TokenStream> {
+        let mut out = proc_macro2::TokenStream::new();
+        while *index < flat.len() {
+            match &flat[*index] {
+                FlatToken::End(_, _) => return Ok(out),
+                FlatToken::Start(delimiter, open_span) => {
+                    let delimiter = *delimiter;
+                    let open_span = *open_span;
+                    *index += 1;
+                    let inner = rec(flat, index)?;
+                    let close_span = match flat.get(*index) {
+                        Some(FlatToken::End(end_delim, span)) if *end_delim == delimiter => {
+                            let span = *span;
+                            *index += 1;
+                            span
+                        }
+                        Some(FlatToken::End(_, span)) => {
+                            return Err(syn::Error::new(
+                                *span,
+                                "mismatched closing delimiter while reconstructing tokens",
+                            ));
+                        }
+                        _ => {
+                            return Err(syn::Error::new(
+                                open_span,
+                                "unclosed delimiter while reconstructing tokens",
+                            ));
+                        }
+                    };
+                    let mut group = Group::new(delimiter, inner);
+                    group.set_span(open_span.join(close_span).unwrap_or(open_span));
+                    out.extend(std::iter::once(TokenTree::Group(group)));
+                }
+                FlatToken::Token(tt) => {
+                    out.extend(std::iter::once(tt.clone()));
+                    *index += 1;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    let mut index = 0;
+    let stream = rec(flat, &mut index)?;
+    if index != flat.len() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "internal error: leftover tokens while reconstructing token stream",
+        ));
+    }
+    Ok(stream)
+}
+
+fn is_percent(flat: &FlatToken) -> bool {
+    matches!(flat, FlatToken::Token(TokenTree::Punct(p)) if p.as_char() == '%')
+}
+
+fn as_ident(flat: &FlatToken) -> Option<&Ident> {
+    match flat {
+        FlatToken::Token(TokenTree::Ident(ident)) => Some(ident),
+        _ => None,
+    }
+}
+
+fn match_percent_percent(flat: &[FlatToken], index: usize) -> bool {
+    index + 1 < flat.len() && is_percent(&flat[index]) && is_percent(&flat[index + 1])
+}
+
+fn find_closing_marker(
+    flat: &[FlatToken],
+    start: usize,
+    first_label: &str,
+    ident: &Ident,
+) -> Option<usize> {
+    let mut i = start;
+    while i + 3 < flat.len() {
+        if let (Some(a), Some(b)) = (as_ident(&flat[i]), as_ident(&flat[i + 1])) {
+            if a == first_label && b == ident && match_percent_percent(flat, i + 2) {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn split_prelude_postlude(stream: proc_macro2::TokenStream) -> Result<RepeatedInput> {
+    let flat = flatten(stream);
+
+    let mut body_start = 0;
+    let mut prelude = Vec::new();
+
+    if match_percent_percent(&flat, 0) {
+        let prelude_ident = as_ident(flat.get(2).ok_or_else(|| {
+            syn::Error::new(
+                Span::call_site(),
+                "expected identifier after `%%` in prelude marker",
+            )
+        })?)
+        .ok_or_else(|| {
+            syn::Error::new(
+                Span::call_site(),
+                "expected identifier after `%%` in prelude marker",
+            )
+        })?;
+        let prelude_kw = as_ident(flat.get(3).ok_or_else(|| {
+            syn::Error::new(
+                prelude_ident.span(),
+                "expected `prelude` after identifier in prelude marker",
+            )
+        })?)
+        .ok_or_else(|| {
+            syn::Error::new(
+                prelude_ident.span(),
+                "expected `prelude` after identifier in prelude marker",
+            )
+        })?;
+        if prelude_kw != "prelude" {
+            return Err(syn::Error::new(
+                prelude_kw.span(),
+                "expected `prelude` after identifier in prelude marker",
+            ));
+        }
+
+        let close = find_closing_marker(&flat, 4, "prelude", prelude_ident).ok_or_else(|| {
+            syn::Error::new(
+                prelude_ident.span(),
+                format!(
+                    "could not find closing prelude marker `prelude {} %%`",
+                    prelude_ident
+                ),
+            )
+        })?;
+
+        prelude = flat[4..close].to_vec();
+        body_start = close + 4;
+    }
+
+    let mut postlude = Vec::new();
+    let mut post_marker = None;
+    {
+        let mut i = body_start;
+        while i + 3 < flat.len() {
+            if match_percent_percent(&flat, i) {
+                if let (Some(ident), Some(kw)) = (as_ident(&flat[i + 2]), as_ident(&flat[i + 3])) {
+                    if kw == "postlude" {
+                        post_marker = Some((i, ident.clone()));
+                        break;
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
+    let body_end = if let Some((post_start, post_ident)) = post_marker {
+        let close = find_closing_marker(&flat, post_start + 4, "postlude", &post_ident)
+            .ok_or_else(|| {
+                syn::Error::new(
+                    post_ident.span(),
+                    format!(
+                        "could not find closing postlude marker `postlude {} %%`",
+                        post_ident
+                    ),
+                )
+            })?;
+        if close + 4 != flat.len() {
+            return Err(syn::Error::new(
+                post_ident.span(),
+                "tokens found after closing postlude marker",
+            ));
+        }
+        postlude = flat[post_start + 4..close].to_vec();
+        post_start
+    } else {
+        flat.len()
+    };
+
+    // The for-body slice is balanced on its own, so it can be re-grouped safely.
+    let body_stream = unflatten(&flat[body_start..body_end])?;
+    let definition: RepeatDefinition = syn::parse2(body_stream)?;
+
+    Ok(RepeatedInput {
+        prelude,
+        definition,
+        postlude,
+    })
+}
+
+fn is_percent_tt(tt: &TokenTree) -> bool {
+    matches!(tt, TokenTree::Punct(p) if p.as_char() == '%')
+}
+
+/// If `tokens[index..]` starts with `%% <id> %%`, returns the index past the marker.
+fn match_placeholder_at(tokens: &[TokenTree], index: usize, replacement_id: &str) -> Option<usize> {
+    if index + 4 >= tokens.len() {
+        return None;
+    }
+    if !is_percent_tt(&tokens[index]) || !is_percent_tt(&tokens[index + 1]) {
+        return None;
+    }
+    match &tokens[index + 2] {
+        TokenTree::Ident(ident) if ident == replacement_id => {}
+        _ => return None,
+    }
+    if !is_percent_tt(&tokens[index + 3]) || !is_percent_tt(&tokens[index + 4]) {
+        return None;
+    }
+    Some(index + 5)
+}
+
+fn substitute_literal(lit: &Literal, replacement_id: &str, value: u32) -> TokenTree {
+    let rendered = lit.to_string();
+    let needle = format!("%%{}%%", replacement_id);
+    if !rendered.contains(&needle) {
+        return TokenTree::Literal(lit.clone());
+    }
+    let replaced = rendered.replace(&needle, &value.to_string());
+    match replaced.parse::<proc_macro2::TokenStream>() {
+        Ok(stream) => stream
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| TokenTree::Literal(lit.clone())),
+        Err(_) => TokenTree::Literal(lit.clone()),
+    }
+}
+
+fn substitute_stream(
+    input: proc_macro2::TokenStream,
+    replacement_id: &str,
+    value: u32,
+) -> proc_macro2::TokenStream {
+    let tokens: Vec<TokenTree> = input.into_iter().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+
+    while i < tokens.len() {
+        if let TokenTree::Ident(ident) = &tokens[i] {
+            if let Some(end) = match_placeholder_at(&tokens, i + 1, replacement_id) {
+                let name = format!("{}{}", ident, value);
+                out.push(TokenTree::Ident(Ident::new(&name, ident.span())));
+                i = end;
+                continue;
+            }
+        }
+
+        if let Some(end) = match_placeholder_at(&tokens, i, replacement_id) {
+            let mut lit = Literal::u32_unsuffixed(value);
+            if let TokenTree::Punct(percent) = &tokens[i] {
+                lit.set_span(percent.span());
+            }
+            out.push(TokenTree::Literal(lit));
+            i = end;
+            continue;
+        }
+
+        match &tokens[i] {
+            TokenTree::Group(group) => {
+                let inner = substitute_stream(group.stream(), replacement_id, value);
+                let mut new_group = Group::new(group.delimiter(), inner);
+                new_group.set_span(group.span());
+                out.push(TokenTree::Group(new_group));
+            }
+            TokenTree::Literal(lit) => {
+                out.push(substitute_literal(lit, replacement_id, value));
+            }
+            other => out.push(other.clone()),
+        }
+        i += 1;
+    }
+
+    out.into_iter().collect()
+}
+
+fn flat_to_string(flat: &[FlatToken]) -> String {
+    let mut s = String::new();
+    for token in flat {
+        match token {
+            FlatToken::Token(TokenTree::Punct(punct)) => {
+                s.push(punct.as_char());
+                if punct.spacing() == Spacing::Alone {
+                    s.push(' ');
+                }
+            }
+            FlatToken::Token(other) => {
+                s.push_str(&other.to_string());
+                s.push(' ');
+            }
+            FlatToken::Start(Delimiter::Parenthesis, _) => s.push('('),
+            FlatToken::Start(Delimiter::Brace, _) => s.push('{'),
+            FlatToken::Start(Delimiter::Bracket, _) => s.push('['),
+            FlatToken::Start(Delimiter::None, _) => {}
+            FlatToken::End(Delimiter::Parenthesis, _) => {
+                s.push(')');
+                s.push(' ');
+            }
+            FlatToken::End(Delimiter::Brace, _) => {
+                s.push('}');
+                s.push(' ');
+            }
+            FlatToken::End(Delimiter::Bracket, _) => {
+                s.push(']');
+                s.push(' ');
+            }
+            FlatToken::End(Delimiter::None, _) => {}
+        }
+    }
+    s
+}
+
+impl RepeatedInput {
+    fn expand(self) -> Result<proc_macro2::TokenStream> {
+        let RepeatedInput {
+            prelude,
+            definition,
+            postlude,
+        } = self;
+
+        let start = definition.range.low.base10_parse::<u32>()?;
+        let end = definition.range.high.base10_parse::<u32>()?;
+        let step = match &definition.range.step {
+            Some(step) => step.base10_parse::<usize>()?,
+            None => 1,
+        };
+        if step == 0 {
+            return Err(syn::Error::new(
+                definition
+                    .range
+                    .step
+                    .as_ref()
+                    .map(|s| s.span())
+                    .unwrap_or_else(Span::call_site),
+                "repeat step must be non-zero",
+            ));
+        }
+
+        let replacement_id = definition.replacement_id.to_string();
+        let separator = definition.separator.value();
+
+        // Prelude/postlude stay flat so braces opened in the prelude and closed
+        // in the postlude are only re-parsed after joining. Bodies are substituted
+        // via a token-tree walk — preserving empty-separator gluing
+        // (e.g. `{1}` joined with `""` → `1111`).
+        let mut parts: Vec<String> = Vec::new();
+        if !prelude.is_empty() {
+            parts.push(flat_to_string(&prelude));
+        }
+        for value in (start..=end).step_by(step) {
+            let substituted = substitute_stream(
+                definition.repeat_block.clone(),
+                &replacement_id,
+                value,
+            );
+            parts.push(substituted.to_string());
+        }
+        if !postlude.is_empty() {
+            parts.push(flat_to_string(&postlude));
+        }
+
+        parts
+            .join(&separator)
+            .parse()
+            .map_err(|err: proc_macro2::LexError| {
+                syn::Error::new(
+                    Span::call_site(),
+                    format!("failed to parse expanded tokens: {}", err),
+                )
+            })
+    }
 }
 
 #[proc_macro]
-pub fn repeated(repeated_tokens: TokenStream) -> TokenStream {
-    let tokens_string = format!("{}", repeated_tokens);
-
-    let mut prelude_ident = None;
-    let mut prelude_string = String::new();
-    let prelude_ident_captures = PRELUDE_IDENT_RE.captures(&tokens_string);
-    if let Some(prelude_ident_captures) = prelude_ident_captures {
-        prelude_ident = Some(prelude_ident_captures["prelude_ident"].to_string());
-        let prelude_re = Regex::new(&format!(
-            r"(?s)^\s*?%\s*?%\s*?{}\s*?prelude\s?(?P<prelude>.*)\s?prelude\s*?{}\s*?%\s*?%",
-            prelude_ident.as_ref().unwrap(),
-            prelude_ident.as_ref().unwrap()
-        ))
-        .unwrap();
-        let prelude_body_captures = prelude_re.captures(&tokens_string);
-        let prelude_body = &prelude_body_captures.unwrap()["prelude"];
-        prelude_string = prelude_body.into();
-    }
-
-    let mut postlude_ident = None;
-    let mut postlude_string = String::new();
-    let postlude_ident_captures = POSTLUDE_IDENT_RE.captures(&tokens_string);
-    if let Some(postlude_ident_captures) = postlude_ident_captures {
-        postlude_ident = Some(postlude_ident_captures["postlude_ident"].to_string());
-        let postlude_re = Regex::new(&format!(
-            r"(?s)%\s*?%\s*?{}\s*?postlude\s?(?P<postlude>.*)\s?postlude\s*?{}\s*?%\s*?%\s*?$",
-            postlude_ident.as_ref().unwrap(),
-            postlude_ident.as_ref().unwrap()
-        ))
-        .unwrap();
-        let postlude_body_captures = postlude_re.captures(&tokens_string);
-        let postlude_body = &postlude_body_captures.unwrap()["postlude"];
-        postlude_string = postlude_body.into();
-    }
-
-    // Figure out what the repeated body template is
-    let mut rep_body_string = None;
-    match (prelude_ident, postlude_ident) {
-        (None, None) => {}
-        (Some(prelude_ident), Some(postlude_ident)) => {
-            let body_re = Regex::new(&format!(r"(?xs)
-            ^\s*?%\s*?%\s*?{}\s*?prelude\s?(?P<prelude>.*)\s?prelude\s*?{}\s*?%\s*?%       # Prelude
-            (?P<body>.*?)                                                                # Repitition Body
-            %\s*?%\s*?{}\s*?postlude\s?(?P<postlude>.*)\s?postlude\s*?{}\s*?%\s*?%\s*?$    # Postlude",
-            prelude_ident, prelude_ident, postlude_ident, postlude_ident)).unwrap();
-            let body_captures = body_re.captures(&tokens_string).unwrap();
-            rep_body_string = Some((&body_captures["body"]).to_string());
-        }
-        (Some(prelude_ident), None) => {
-            let body_re = Regex::new(&format!(r"(?xs)
-            ^\s*?%\s*?%\s*?{}\s*?prelude\s?(?P<prelude>.*)\s?prelude\s*?{}\s*?%\s*?%       # Prelude
-            (?P<body>.*?)                                                                # Repitition Body",
-            prelude_ident, prelude_ident)).unwrap();
-            let body_captures = body_re.captures(&tokens_string).unwrap();
-            rep_body_string = Some((&body_captures["body"]).to_string());
-        }
-        (None, Some(postlude_ident)) => {
-            let body_re = Regex::new(&format!(r"(?xs)
-            (?P<body>.*?)                                                                # Repitition Body
-            %\s*?%\s*?{}\s*?postlude\s?(?P<postlude>.*)\s?postlude\s*?{}\s*?%\s*?%\s*?$    # Postlude",
-            postlude_ident, postlude_ident)).unwrap();
-            let body_captures = body_re.captures(&tokens_string).unwrap();
-            rep_body_string = Some((&body_captures["body"]).to_string());
-        }
-    }
-
-    let rep_body_tokenstream = if let Some(rep_body_string) = rep_body_string {
-        // TODO: Get the generated tokenstreams to use the spans from the original tokenstream so that we can indicate syntax errors more easily!
-        TokenStream::from(
-            rep_body_string
-                .parse::<proc_macro2::TokenStream>()
-                .unwrap_or_else(|e| {
-                    let e: syn::Error = e.into();
-                    e.to_compile_error()
-                }),
-        )
-    } else {
-        repeated_tokens
-    };
-    let repitition_definition: RepeatDefinition = parse_macro_input!(rep_body_tokenstream);
-    generate_repititions(prelude_string, repitition_definition, postlude_string)
-        .unwrap_or_else(|e| TokenStream::from(e.to_compile_error()))
-}
-
-fn generate_repititions(
-    prelude_string: String,
-    repitition_definition: RepeatDefinition,
-    postlude_string: String,
-) -> Result<TokenStream> {
-    // Determine our range and step_by parameters for repititions
-    let start = repitition_definition.range.low.base10_parse::<u32>()?;
-    let end = repitition_definition.range.high.base10_parse::<u32>()?;
-    let step = repitition_definition
-        .range
-        .step
-        .map_or(Ok(1), |s| s.base10_parse::<usize>())?;
-
-    // Generate string versions of repeated tokenstream
-    let replacement_id = repitition_definition.replacement_id.to_string();
-    let repeated_block: String = repitition_definition.repeat_block.to_string();
-    let mut repeated_blocks = if prelude_string.is_empty() { Vec::new() } else { vec![prelude_string] };
-    for i in (start..=end).step_by(step) {
-        let new_block = repeated_block
-            .replace(&format!(" % % {} % % ", replacement_id), &format!("{}", i))
-            .replace(&format!("% % {} % %", replacement_id), &format!("{}", i))
-            .replace(&format!("%%{}%%", replacement_id), &format!("{}", i));
-        repeated_blocks.push(new_block);
-    }
-    
-    if !postlude_string.is_empty() {
-        repeated_blocks.push(postlude_string);
-    }
-
-    // Build final tokenstream by joining all repeated tokenstreams with the prelude and the postlude
-    let separator = repitition_definition.separator.value();
-    let repeated_tokenstream: proc_macro2::TokenStream =
-        repeated_blocks.join(&separator).parse()?;
-    Ok(TokenStream::from(repeated_tokenstream))
+pub fn repeated(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as RepeatedInput);
+    input
+        .expand()
+        .unwrap_or_else(|err| err.to_compile_error())
+        .into()
 }
