@@ -1,0 +1,5 @@
+error: repeat range expects at most three values: [low; high; step]
+ --> tests/ui/range_error_with_prelude.rs:9:18
+  |
+9 |         for x in [0; 1; 2; 3] {
+  |                  ^

@@ -3,7 +3,7 @@ use proc_macro2::{Delimiter, Group, Ident, Literal, Spacing, Span, TokenTree};
 use syn::{
     braced, bracketed,
     parse::{Parse, ParseStream},
-    parse_macro_input, LitInt, LitStr, Result, Token,
+    parse_macro_input, Lit, LitInt, LitStr, Result, Token,
 };
 
 struct RepeatedInput {
@@ -14,47 +14,166 @@ struct RepeatedInput {
 
 struct RepeatDefinition {
     replacement_id: Ident,
-    range: RepeatRange,
+    source: RepeatSource,
     repeat_block: proc_macro2::TokenStream,
     separator: LitStr,
 }
 
-struct RepeatRange {
-    low: LitInt,
-    high: LitInt,
-    step: Option<LitInt>,
+enum RepeatSource {
+    Range {
+        low: LitInt,
+        high: LitInt,
+        step: Option<LitInt>,
+    },
+    List(Vec<SubstValue>),
 }
 
-impl Parse for RepeatRange {
+/// A single value from an enumerated substitution list.
+enum SubstValue {
+    Ident(Ident),
+    Lit(Lit),
+}
+
+impl Parse for SubstValue {
+    fn parse(input: ParseStream) -> Result<Self> {
+        if input.peek(syn::Ident) {
+            Ok(SubstValue::Ident(input.parse()?))
+        } else {
+            Ok(SubstValue::Lit(input.parse()?))
+        }
+    }
+}
+
+impl SubstValue {
+    fn as_replacement(&self) -> Replacement {
+        match self {
+            SubstValue::Ident(ident) => Replacement {
+                text: ident.to_string(),
+                token: TokenTree::Ident(ident.clone()),
+            },
+            SubstValue::Lit(lit) => {
+                let token = lit_to_token_tree(lit);
+                Replacement {
+                    text: token.to_string(),
+                    token,
+                }
+            }
+        }
+    }
+}
+
+fn lit_to_token_tree(lit: &Lit) -> TokenTree {
+    match lit {
+        Lit::Str(l) => TokenTree::Literal(l.token()),
+        Lit::ByteStr(l) => TokenTree::Literal(l.token()),
+        Lit::CStr(l) => TokenTree::Literal(l.token()),
+        Lit::Byte(l) => TokenTree::Literal(l.token()),
+        Lit::Char(l) => TokenTree::Literal(l.token()),
+        Lit::Int(l) => TokenTree::Literal(l.token()),
+        Lit::Float(l) => TokenTree::Literal(l.token()),
+        Lit::Bool(l) => TokenTree::Ident(Ident::new(
+            if l.value() { "true" } else { "false" },
+            l.span(),
+        )),
+        Lit::Verbatim(l) => TokenTree::Literal(l.clone()),
+        _ => TokenTree::Ident(Ident::new("_", lit.span())),
+    }
+}
+
+/// Value substituted for `%%id%%` in a repetition.
+#[derive(Clone)]
+struct Replacement {
+    /// Display form used in ident concatenation and string literal rewrite.
+    text: String,
+    /// Token emitted for a bare `%%id%%` placeholder.
+    token: TokenTree,
+}
+
+impl Replacement {
+    fn from_number(value: u32, span: Span) -> Self {
+        let mut lit = Literal::u32_unsuffixed(value);
+        lit.set_span(span);
+        Self {
+            text: value.to_string(),
+            token: TokenTree::Literal(lit),
+        }
+    }
+
+    fn with_span(&self, span: Span) -> Self {
+        let mut token = self.token.clone();
+        token.set_span(span);
+        Self {
+            text: self.text.clone(),
+            token,
+        }
+    }
+}
+
+impl Parse for RepeatSource {
     fn parse(input: ParseStream) -> Result<Self> {
         let content;
         let bracket = bracketed!(content in input);
-        let values: Vec<LitInt> =
-            syn::punctuated::Punctuated::<LitInt, Token![;]>::parse_terminated(&content)?
+
+        if content.is_empty() {
+            return Err(syn::Error::new(
+                bracket.span.open(),
+                "repeat source cannot be empty; use [low; high], [low; high; step], or [a, b, c]",
+            ));
+        }
+
+        if top_level_has_semi(&content.fork())? {
+            let values: Vec<LitInt> =
+                syn::punctuated::Punctuated::<LitInt, Token![;]>::parse_terminated(&content)?
+                    .into_iter()
+                    .collect();
+
+            return match values.len() {
+                2 => Ok(RepeatSource::Range {
+                    low: values[0].clone(),
+                    high: values[1].clone(),
+                    step: None,
+                }),
+                3 => Ok(RepeatSource::Range {
+                    low: values[0].clone(),
+                    high: values[1].clone(),
+                    step: Some(values[2].clone()),
+                }),
+                0 | 1 => Err(syn::Error::new(
+                    bracket.span.open(),
+                    "repeat range requires [low; high] or [low; high; step]",
+                )),
+                _ => Err(syn::Error::new(
+                    bracket.span.open(),
+                    "repeat range expects at most three values: [low; high; step]",
+                )),
+            };
+        }
+
+        let values: Vec<SubstValue> =
+            syn::punctuated::Punctuated::<SubstValue, Token![,]>::parse_terminated(&content)?
                 .into_iter()
                 .collect();
 
-        match values.len() {
-            2 => Ok(RepeatRange {
-                low: values[0].clone(),
-                high: values[1].clone(),
-                step: None,
-            }),
-            3 => Ok(RepeatRange {
-                low: values[0].clone(),
-                high: values[1].clone(),
-                step: Some(values[2].clone()),
-            }),
-            0 | 1 => Err(syn::Error::new(
+        if values.is_empty() {
+            return Err(syn::Error::new(
                 bracket.span.open(),
-                "repeat range requires [low; high] or [low; high; step]",
-            )),
-            _ => Err(syn::Error::new(
-                bracket.span.open(),
-                "repeat range expects at most three values: [low; high; step]",
-            )),
+                "enumerated substitution list cannot be empty",
+            ));
         }
+
+        Ok(RepeatSource::List(values))
     }
+}
+
+/// True if the stream contains a top-level `;` (not nested in a group).
+fn top_level_has_semi(input: ParseStream) -> Result<bool> {
+    while !input.is_empty() {
+        if input.peek(Token![;]) {
+            return Ok(true);
+        }
+        let _ = input.parse::<proc_macro2::TokenTree>()?;
+    }
+    Ok(false)
 }
 
 impl Parse for RepeatDefinition {
@@ -62,7 +181,7 @@ impl Parse for RepeatDefinition {
         let _: Token![for] = input.parse()?;
         let replacement_id: Ident = input.parse()?;
         let _: Token![in] = input.parse()?;
-        let range: RepeatRange = input.parse()?;
+        let source: RepeatSource = input.parse()?;
         let block_content;
         braced!(block_content in input);
         let repeat_block = block_content.parse()?;
@@ -76,7 +195,7 @@ impl Parse for RepeatDefinition {
 
         Ok(RepeatDefinition {
             replacement_id,
-            range,
+            source,
             repeat_block,
             separator,
         })
@@ -164,8 +283,13 @@ fn unflatten(flat: &[FlatToken]) -> Result<proc_macro2::TokenStream> {
     let mut index = 0;
     let stream = rec(flat, &mut index)?;
     if index != flat.len() {
+        let span = match flat.get(index) {
+            Some(FlatToken::Token(tt)) => tt.span(),
+            Some(FlatToken::Start(_, span)) | Some(FlatToken::End(_, span)) => *span,
+            None => Span::call_site(),
+        };
         return Err(syn::Error::new(
-            Span::call_site(),
+            span,
             "internal error: leftover tokens while reconstructing token stream",
         ));
     }
@@ -205,6 +329,14 @@ fn find_closing_marker(
     None
 }
 
+fn flat_span_at(flat: &[FlatToken], index: usize) -> Span {
+    match flat.get(index) {
+        Some(FlatToken::Token(tt)) => tt.span(),
+        Some(FlatToken::Start(_, span)) | Some(FlatToken::End(_, span)) => *span,
+        None => Span::call_site(),
+    }
+}
+
 fn split_prelude_postlude(stream: proc_macro2::TokenStream) -> Result<RepeatedInput> {
     let flat = flatten(stream);
 
@@ -212,15 +344,16 @@ fn split_prelude_postlude(stream: proc_macro2::TokenStream) -> Result<RepeatedIn
     let mut prelude = Vec::new();
 
     if match_percent_percent(&flat, 0) {
+        let open_span = flat_span_at(&flat, 0);
         let prelude_ident = as_ident(flat.get(2).ok_or_else(|| {
             syn::Error::new(
-                Span::call_site(),
+                open_span,
                 "expected identifier after `%%` in prelude marker",
             )
         })?)
         .ok_or_else(|| {
             syn::Error::new(
-                Span::call_site(),
+                flat_span_at(&flat, 2.min(flat.len().saturating_sub(1))),
                 "expected identifier after `%%` in prelude marker",
             )
         })?;
@@ -287,7 +420,7 @@ fn split_prelude_postlude(stream: proc_macro2::TokenStream) -> Result<RepeatedIn
             })?;
         if close + 4 != flat.len() {
             return Err(syn::Error::new(
-                post_ident.span(),
+                flat_span_at(&flat, close + 4),
                 "tokens found after closing postlude marker",
             ));
         }
@@ -296,6 +429,13 @@ fn split_prelude_postlude(stream: proc_macro2::TokenStream) -> Result<RepeatedIn
     } else {
         flat.len()
     };
+
+    if body_start >= body_end {
+        return Err(syn::Error::new(
+            flat_span_at(&flat, body_start.min(flat.len().saturating_sub(1))),
+            "missing `for ... in ... { ... }` repeat body",
+        ));
+    }
 
     let body_stream = unflatten(&flat[body_start..body_end])?;
     let definition: RepeatDefinition = syn::parse2(body_stream)?;
@@ -311,7 +451,11 @@ fn is_percent_tt(tt: &TokenTree) -> bool {
     matches!(tt, TokenTree::Punct(p) if p.as_char() == '%')
 }
 
-fn match_placeholder_at(tokens: &[TokenTree], index: usize, replacement_id: &str) -> Option<usize> {
+fn match_placeholder_at(
+    tokens: &[TokenTree],
+    index: usize,
+    replacement_id: &str,
+) -> Option<(usize, Span)> {
     if index + 4 >= tokens.len() {
         return None;
     }
@@ -325,70 +469,143 @@ fn match_placeholder_at(tokens: &[TokenTree], index: usize, replacement_id: &str
     if !is_percent_tt(&tokens[index + 3]) || !is_percent_tt(&tokens[index + 4]) {
         return None;
     }
-    Some(index + 5)
+    let span = tokens[index]
+        .span()
+        .join(tokens[index + 4].span())
+        .unwrap_or_else(|| tokens[index].span());
+    Some((index + 5, span))
 }
 
-fn substitute_literal(lit: &Literal, replacement_id: &str, value: u32) -> TokenTree {
-    let rendered = lit.to_string();
-    let needle = format!("%%{}%%", replacement_id);
-    if !rendered.contains(&needle) {
-        return TokenTree::Literal(lit.clone());
-    }
-    let replaced = rendered.replace(&needle, &value.to_string());
-    match replaced.parse::<proc_macro2::TokenStream>() {
-        Ok(stream) => stream
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| TokenTree::Literal(lit.clone())),
-        Err(_) => TokenTree::Literal(lit.clone()),
-    }
+/// Precompiled repeat-block template: placeholder matching runs once per expansion.
+#[derive(Clone)]
+enum TemplatePart {
+    /// Static token (not a group — groups are [`TemplatePart::Group`]).
+    Token(TokenTree),
+    /// Bare `%%id%%` → emit replacement token.
+    Placeholder { span: Span },
+    /// `prefix%%id%%` → emit concatenated ident.
+    ConcatIdent { prefix: Ident },
+    /// Group whose interior is itself a template.
+    Group {
+        delimiter: Delimiter,
+        span: Span,
+        inner: Template,
+    },
+    /// Literal whose rendered text contains `%%id%%`.
+    LitRewrite { lit: Literal, needle: String },
 }
 
-fn substitute_stream(
-    input: proc_macro2::TokenStream,
-    replacement_id: &str,
-    value: u32,
-) -> proc_macro2::TokenStream {
-    let tokens: Vec<TokenTree> = input.into_iter().collect();
-    let mut out = Vec::with_capacity(tokens.len());
-    let mut i = 0;
+#[derive(Clone)]
+struct Template {
+    parts: Vec<TemplatePart>,
+}
 
-    while i < tokens.len() {
-        if let TokenTree::Ident(ident) = &tokens[i] {
-            if let Some(end) = match_placeholder_at(&tokens, i + 1, replacement_id) {
-                let name = format!("{}{}", ident, value);
-                out.push(TokenTree::Ident(Ident::new(&name, ident.span())));
+impl Template {
+    fn compile(input: proc_macro2::TokenStream, replacement_id: &str) -> Self {
+        let needle = format!("%%{}%%", replacement_id);
+        let tokens: Vec<TokenTree> = input.into_iter().collect();
+        let mut parts = Vec::with_capacity(tokens.len());
+        let mut i = 0;
+
+        while i < tokens.len() {
+            // Concatenate only when the preceding ident ends with `_`
+            // (`item_%%n%%` → `item_0`). Plain `for %%T%%` must stay two tokens.
+            if let TokenTree::Ident(ident) = &tokens[i] {
+                if ident.to_string().ends_with('_') {
+                    if let Some((end, _)) = match_placeholder_at(&tokens, i + 1, replacement_id) {
+                        parts.push(TemplatePart::ConcatIdent {
+                            prefix: ident.clone(),
+                        });
+                        i = end;
+                        continue;
+                    }
+                }
+            }
+
+            if let Some((end, span)) = match_placeholder_at(&tokens, i, replacement_id) {
+                parts.push(TemplatePart::Placeholder { span });
                 i = end;
                 continue;
             }
+
+            match &tokens[i] {
+                TokenTree::Group(group) => {
+                    parts.push(TemplatePart::Group {
+                        delimiter: group.delimiter(),
+                        span: group.span(),
+                        inner: Template::compile(group.stream(), replacement_id),
+                    });
+                }
+                TokenTree::Literal(lit) => {
+                    let rendered = lit.to_string();
+                    if rendered.contains(&needle) {
+                        parts.push(TemplatePart::LitRewrite {
+                            lit: lit.clone(),
+                            needle: needle.clone(),
+                        });
+                    } else {
+                        parts.push(TemplatePart::Token(TokenTree::Literal(lit.clone())));
+                    }
+                }
+                other => parts.push(TemplatePart::Token(other.clone())),
+            }
+            i += 1;
         }
 
-        if let Some(end) = match_placeholder_at(&tokens, i, replacement_id) {
-            let mut lit = Literal::u32_unsuffixed(value);
-            if let TokenTree::Punct(percent) = &tokens[i] {
-                lit.set_span(percent.span());
-            }
-            out.push(TokenTree::Literal(lit));
-            i = end;
-            continue;
-        }
-
-        match &tokens[i] {
-            TokenTree::Group(group) => {
-                let inner = substitute_stream(group.stream(), replacement_id, value);
-                let mut new_group = Group::new(group.delimiter(), inner);
-                new_group.set_span(group.span());
-                out.push(TokenTree::Group(new_group));
-            }
-            TokenTree::Literal(lit) => {
-                out.push(substitute_literal(lit, replacement_id, value));
-            }
-            other => out.push(other.clone()),
-        }
-        i += 1;
+        Template { parts }
     }
 
-    out.into_iter().collect()
+    fn instantiate(&self, replacement: &Replacement) -> proc_macro2::TokenStream {
+        let mut out = Vec::with_capacity(self.parts.len());
+        for part in &self.parts {
+            match part {
+                TemplatePart::Token(tt) => out.push(tt.clone()),
+                TemplatePart::Placeholder { span } => {
+                    out.push(replacement.with_span(*span).token);
+                }
+                TemplatePart::ConcatIdent { prefix } => {
+                    let name = format!("{}{}", prefix, replacement.text);
+                    out.push(TokenTree::Ident(Ident::new(&name, prefix.span())));
+                }
+                TemplatePart::Group {
+                    delimiter,
+                    span,
+                    inner,
+                } => {
+                    let mut group = Group::new(*delimiter, inner.instantiate(replacement));
+                    group.set_span(*span);
+                    out.push(TokenTree::Group(group));
+                }
+                TemplatePart::LitRewrite { lit, needle } => {
+                    let rendered = lit.to_string();
+                    let replaced = rendered.replace(needle, &replacement.text);
+                    match replaced.parse::<proc_macro2::TokenStream>() {
+                        Ok(stream) => {
+                            if let Some(mut tt) = stream.into_iter().next() {
+                                tt.set_span(lit.span());
+                                out.push(tt);
+                            } else {
+                                out.push(TokenTree::Literal(lit.clone()));
+                            }
+                        }
+                        Err(_) => out.push(TokenTree::Literal(lit.clone())),
+                    }
+                }
+            }
+        }
+        out.into_iter().collect()
+    }
+
+    /// Approximate token count for capacity hints.
+    fn rough_len(&self) -> usize {
+        self.parts
+            .iter()
+            .map(|p| match p {
+                TemplatePart::Group { inner, .. } => inner.rough_len() + 2,
+                _ => 1,
+            })
+            .sum()
+    }
 }
 
 fn push_flat_to_string(flat: &[FlatToken], s: &mut String) {
@@ -442,47 +659,26 @@ impl RepeatedInput {
             postlude,
         } = self;
 
-        let start = definition.range.low.base10_parse::<u32>()?;
-        let end = definition.range.high.base10_parse::<u32>()?;
-        let step = match &definition.range.step {
-            Some(step) => step.base10_parse::<usize>()?,
-            None => 1,
-        };
-        if step == 0 {
-            return Err(syn::Error::new(
-                definition
-                    .range
-                    .step
-                    .as_ref()
-                    .map(|s| s.span())
-                    .unwrap_or_else(Span::call_site),
-                "repeat step must be non-zero",
-            ));
-        }
-
         let replacement_id = definition.replacement_id.to_string();
+        let template = Template::compile(definition.repeat_block, &replacement_id);
         let separator = definition.separator.value();
-        let count = iter_values(start, end, step).count();
+        let sep_span = definition.separator.span();
+
+        let replacements = collect_replacements(&definition.source)?;
 
         // Empty separator concatenates rendered tokens so adjacent literals/idents
         // can glue (`1` x4 -> `1111`). That path still needs a string round-trip.
         if separator.is_empty() {
-            return expand_gluing(
-                &prelude,
-                &postlude,
-                &definition.repeat_block,
-                &replacement_id,
-                start,
-                end,
-                step,
-                count,
-            );
+            return expand_gluing(&prelude, &postlude, &template, &replacements, sep_span);
         }
 
         // Fast path: assemble FlatTokens and unflatten. Whitespace-only separators
         // (including the default `"\n"`) are insignificant to the Rust lexer and
         // can be omitted — avoiding TokenStream::to_string + full re-lex.
-        let mut flat = Vec::with_capacity(prelude.len() + postlude.len() + count.saturating_mul(8));
+        let per = template.rough_len().max(1);
+        let mut flat = Vec::with_capacity(
+            prelude.len() + postlude.len() + replacements.len().saturating_mul(per),
+        );
         flat.extend(prelude);
 
         let sep_flat = if separator.chars().all(char::is_whitespace) {
@@ -491,7 +687,7 @@ impl RepeatedInput {
             let sep_stream: proc_macro2::TokenStream =
                 separator.parse().map_err(|err: proc_macro2::LexError| {
                     syn::Error::new(
-                        definition.separator.span(),
+                        sep_span,
                         format!("failed to parse separator tokens: {}", err),
                     )
                 })?;
@@ -499,15 +695,14 @@ impl RepeatedInput {
         };
 
         let mut first = true;
-        for value in iter_values(start, end, step) {
+        for replacement in &replacements {
             if !first {
                 if let Some(ref sep) = sep_flat {
                     flat.extend(sep.iter().cloned());
                 }
             }
             first = false;
-            let substituted =
-                substitute_stream(definition.repeat_block.clone(), &replacement_id, value);
+            let substituted = template.instantiate(replacement);
             flatten_into(substituted, &mut flat);
         }
         flat.extend(postlude);
@@ -516,32 +711,60 @@ impl RepeatedInput {
     }
 }
 
+fn collect_replacements(source: &RepeatSource) -> Result<Vec<Replacement>> {
+    match source {
+        RepeatSource::Range { low, high, step } => {
+            let start = low.base10_parse::<u32>()?;
+            let end = high.base10_parse::<u32>()?;
+            let step_val = match step {
+                Some(step) => step.base10_parse::<usize>()?,
+                None => 1,
+            };
+            if step_val == 0 {
+                return Err(syn::Error::new(
+                    step.as_ref()
+                        .map(|s| s.span())
+                        .unwrap_or_else(Span::call_site),
+                    "repeat step must be non-zero",
+                ));
+            }
+            let span = low.span();
+            Ok(iter_values(start, end, step_val)
+                .map(|v| Replacement::from_number(v, span))
+                .collect())
+        }
+        RepeatSource::List(values) => Ok(values.iter().map(SubstValue::as_replacement).collect()),
+    }
+}
+
 fn expand_gluing(
     prelude: &[FlatToken],
     postlude: &[FlatToken],
-    repeat_block: &proc_macro2::TokenStream,
-    replacement_id: &str,
-    start: u32,
-    end: u32,
-    step: usize,
-    count: usize,
+    template: &Template,
+    replacements: &[Replacement],
+    error_span: Span,
 ) -> Result<proc_macro2::TokenStream> {
     let mut buf = String::with_capacity(
         prelude.len().saturating_mul(4)
             + postlude.len().saturating_mul(4)
-            + count.saturating_mul(32),
+            + replacements
+                .len()
+                .saturating_mul(template.rough_len().saturating_mul(8).max(32)),
     );
     push_flat_to_string(prelude, &mut buf);
-    for value in iter_values(start, end, step) {
-        let substituted = substitute_stream(repeat_block.clone(), replacement_id, value);
+    for replacement in replacements {
+        let substituted = template.instantiate(replacement);
         push_stream_to_string(substituted, &mut buf);
     }
     push_flat_to_string(postlude, &mut buf);
 
     buf.parse().map_err(|err: proc_macro2::LexError| {
         syn::Error::new(
-            Span::call_site(),
-            format!("failed to parse expanded tokens: {}", err),
+            error_span,
+            format!(
+                "failed to parse expanded tokens (empty separator glues output as text): {}",
+                err
+            ),
         )
     })
 }

@@ -39,3 +39,42 @@ fn supports_stepped_ranges() {
     });
     assert_eq!(values, [0, 2, 4, 6]);
 }
+
+#[test]
+fn supports_enumerated_type_lists() {
+    trait SizeOf {
+        fn size() -> usize;
+    }
+
+    repeated!(for T in [u8, u16, u32] {
+        impl SizeOf for %%T%% {
+            fn size() -> usize {
+                core::mem::size_of::<%%T%%>()
+            }
+        }
+    });
+
+    assert_eq!(<u8 as SizeOf>::size(), 1);
+    assert_eq!(<u16 as SizeOf>::size(), 2);
+    assert_eq!(<u32 as SizeOf>::size(), 4);
+}
+
+#[test]
+fn supports_enumerated_numeric_lists() {
+    let mut values = Vec::new();
+    repeated!(for i in [0, 2, 4, 6] {
+        values.push(%%i%%);
+    });
+    assert_eq!(values, [0, 2, 4, 6]);
+}
+
+#[test]
+fn supports_enumerated_ident_concatenation() {
+    repeated!(for name in [alpha, beta] {
+        fn greet_%%name%%() -> &'static str {
+            "%%name%%"
+        }
+    });
+    assert_eq!(greet_alpha(), "alpha");
+    assert_eq!(greet_beta(), "beta");
+}

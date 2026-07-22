@@ -1,8 +1,15 @@
 //! Compile-stress coverage for large `repeated!` expansions.
 //!
 //! Runtime is trivial; the value is ensuring a several-thousand-iteration
-//! expansion keeps compiling quickly on stable Rust. Time with:
-//! `time cargo test --test compile_stress`
+//! expansion keeps compiling quickly on stable Rust.
+//!
+//! Measure with:
+//! ```text
+//! cargo clean -p repeated
+//! time cargo test --test compile_stress -- --nocapture
+//! ```
+//!
+//! See also `examples/stress_match.rs` and `docs/COMPILE_TIMES.md`.
 
 use repeated::repeated;
 
